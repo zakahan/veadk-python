@@ -18,12 +18,7 @@ from typing import BinaryIO, TextIO
 from pydantic import BaseModel, ConfigDict
 
 from veadk.database.base_database import BaseDatabase
-from veadk.database.kv.redis_database import RedisDatabase
-from veadk.database.local_database import LocalDataBase
-from veadk.database.relational.mysql_database import MysqlDatabase
-from veadk.database.vector.opensearch_vector_database import OpenSearchVectorDatabase
-from veadk.database.viking.viking_database import VikingDatabase
-from veadk.database.viking.viking_memory_db import VikingMemoryDatabase
+from veadk.database.database_factory import DatabaseBackend
 from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,7 +27,7 @@ logger = get_logger(__name__)
 class KVDatabaseAdapter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    client: RedisDatabase
+    client: BaseDatabase
 
     def add(self, data: list[str], index: str):
         logger.debug(f"Adding documents to Redis database: index={index}")
@@ -64,7 +59,7 @@ class KVDatabaseAdapter(BaseModel):
 class RelationalDatabaseAdapter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    client: MysqlDatabase
+    client: BaseDatabase
 
     def create_table(self, table_name: str):
         logger.debug(f"Creating table for SQL database: table_name={table_name}")
@@ -117,7 +112,7 @@ class RelationalDatabaseAdapter(BaseModel):
 class VectorDatabaseAdapter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    client: OpenSearchVectorDatabase
+    client: BaseDatabase
 
     def _validate_index(self, index: str):
         """
@@ -158,7 +153,7 @@ class VectorDatabaseAdapter(BaseModel):
 class VikingDatabaseAdapter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    client: VikingDatabase
+    client: BaseDatabase
 
     def _validate_index(self, index: str):
         """
@@ -217,7 +212,7 @@ class VikingDatabaseAdapter(BaseModel):
 class VikingMemoryDatabaseAdapter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    client: VikingMemoryDatabase
+    client: BaseDatabase
 
     def _validate_index(self, index: str):
         if not (
@@ -252,7 +247,7 @@ class VikingMemoryDatabaseAdapter(BaseModel):
 class LocalDatabaseAdapter(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    client: LocalDataBase
+    client: BaseDatabase
 
     def add(self, data: list[str], **kwargs):
         self.client.add(data)
@@ -262,18 +257,22 @@ class LocalDatabaseAdapter(BaseModel):
 
 
 MAPPING = {
-    RedisDatabase: KVDatabaseAdapter,
-    MysqlDatabase: RelationalDatabaseAdapter,
-    LocalDataBase: LocalDatabaseAdapter,
-    VikingDatabase: VikingDatabaseAdapter,
-    OpenSearchVectorDatabase: VectorDatabaseAdapter,
-    VikingMemoryDatabase: VikingMemoryDatabaseAdapter,
+    DatabaseBackend.REDIS: KVDatabaseAdapter,
+    DatabaseBackend.MYSQL: RelationalDatabaseAdapter,
+    DatabaseBackend.LOCAL: LocalDatabaseAdapter,
+    DatabaseBackend.VIKING: VikingDatabaseAdapter,
+    DatabaseBackend.OPENSEARCH: VectorDatabaseAdapter,
+    DatabaseBackend.VIKING_MEM: VikingMemoryDatabaseAdapter,
 }
 
 
-def get_knowledgebase_database_adapter(database_client: BaseDatabase):
-    return MAPPING[type(database_client)](client=database_client)
+def get_knowledgebase_database_adapter(
+    database_type: str, database_client: BaseDatabase
+):
+    return MAPPING[database_type](client=database_client)
 
 
-def get_long_term_memory_database_adapter(database_client: BaseDatabase):
-    return MAPPING[type(database_client)](client=database_client)
+def get_long_term_memory_database_adapter(
+    database_type: str, database_client: BaseDatabase
+):
+    return MAPPING[database_type](client=database_client)

@@ -57,7 +57,9 @@ class LongTermMemory(BaseMemoryService):
         self.db_client = DatabaseFactory.create(
             backend=backend,
         )
-        self.adapter = get_long_term_memory_database_adapter(self.db_client)
+        self.adapter = get_long_term_memory_database_adapter(
+            self.backend, self.db_client
+        )
 
         logger.info(
             f"Initialized long term memory: db_client={self.db_client} adapter={self.adapter}"

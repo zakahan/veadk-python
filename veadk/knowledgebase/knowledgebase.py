@@ -40,7 +40,7 @@ class KnowledgeBase:
         self.top_k = top_k
 
         self.db_client = DatabaseFactory.create(backend=backend, config=db_config)
-        self.adapter = get_knowledgebase_database_adapter(self.db_client)
+        self.adapter = get_knowledgebase_database_adapter(self.backend, self.db_client)
 
         logger.info(
             f"Initialized knowledgebase: db_client={self.db_client} adapter={self.adapter}"
