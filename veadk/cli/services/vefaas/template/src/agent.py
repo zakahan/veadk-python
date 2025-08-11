@@ -13,11 +13,18 @@
 # limitations under the License.
 
 from veadk import Agent
+from veadk.knowledgebase import KnowledgeBase
+from veadk.memory.long_term_memory import LongTermMemory
 from veadk.memory.short_term_memory import ShortTermMemory
 from veadk.tools.demo_tools import get_city_weather
+from veadk.tools.load_knowledgebase_tool import knowledgebase
 
 app_name: str = "weather-reporter"  # <--- export your app name
-agent: Agent = Agent(tools=[get_city_weather])  # <--- export your agent
+ltm = LongTermMemory(backend="local")
+kb = KnowledgeBase(backend="local")
+agent: Agent = Agent(
+    tools=[get_city_weather], long_term_memory=ltm, knowledgebase=knowledgebase
+)  # <--- export your agent
 short_term_memory: ShortTermMemory = (
     ShortTermMemory()
 )  # <--- export your short term memory
