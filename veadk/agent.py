@@ -97,6 +97,9 @@ class Agent(LlmAgent):
     tracers: list[BaseTracer] = []
     """The tracers provided to agent."""
 
+    enable_responses: bool = False
+    """[beta] Whether to enable responses api from the model."""
+
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(None)  # for sub_agents init
 
@@ -119,12 +122,22 @@ class Agent(LlmAgent):
         logger.info(f"Model extra config: {self.model_extra_config}")
 
         if not self.model:
-            self.model = LiteLlm(
-                model=f"{self.model_provider}/{self.model_name}",
-                api_key=self.model_api_key,
-                api_base=self.model_api_base,
-                **self.model_extra_config,
-            )
+            if self.enable_responses:
+                from veadk.models.ark_llm import ArkLlm
+
+                self.model = ArkLlm(
+                    model=f"{self.model_provider}/{self.model_name}",
+                    api_key=self.model_api_key,
+                    api_base=self.model_api_base,
+                    **self.model_extra_config,
+                )
+            else:
+                self.model = LiteLlm(
+                    model=f"{self.model_provider}/{self.model_name}",
+                    api_key=self.model_api_key,
+                    api_base=self.model_api_base,
+                    **self.model_extra_config,
+                )
             logger.debug(
                 f"LiteLLM client created with config: {self.model_extra_config}"
             )
