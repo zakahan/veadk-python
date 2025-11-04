@@ -78,3 +78,125 @@ def patch_google_adk_telemetry() -> None:
                     logger.debug(
                         f"Patch {mod_name} {var_name} with {trace_functions[var_name]}"
                     )
+
+
+def patch_litellm_responses_handler() -> None:
+    """Patch litellm ResponsesToCompletionBridgeHandler.transformation_handler."""
+    # Prevent duplicate patches
+    if hasattr(patch_litellm_responses_handler, "_patched"):
+        logger.debug("ResponsesToCompletionBridgeHandler already patched, skipping")
+        return
+
+    try:
+        from litellm.completion_extras.litellm_responses_transformation.handler import (
+            ResponsesToCompletionBridgeHandler,
+            responses_api_bridge,
+        )
+        from litellm.completion_extras.litellm_responses_transformation.transformation import (
+            LiteLLMResponsesTransformationHandler,
+        )
+
+        class CustomLiteLLMResponsesTransformationHandler(
+            LiteLLMResponsesTransformationHandler
+        ):
+            """Custom implementation of LiteLLMResponsesTransformationHandler"""
+
+            def __init__(self):
+                super().__init__()
+                logger.debug("Using custom LiteLLMResponsesTransformationHandler")
+
+            def transform_request(self, *args, **kwargs):
+                result = super().transform_request(*args, **kwargs)
+                # append custom param for responses api
+                previous_responses_id = (
+                    kwargs.get("optional_params", {})
+                    .get("extra_body", {})
+                    .get("previous_response_id")
+                )
+                if previous_responses_id:
+                    result["previous_responses_id"] = previous_responses_id
+                return result
+
+            def transform_response(self, *args, **kwargs):
+                result = super().transform_response(*args, **kwargs)
+                raw_response = kwargs.get("raw_response")
+                if raw_response and hasattr(raw_response, "id"):
+                    result.id = raw_response.id
+                return result
+
+        def patched_init(self):
+            super(ResponsesToCompletionBridgeHandler, self).__init__()
+            self.transformation_handler = CustomLiteLLMResponsesTransformationHandler()
+            logger.debug(
+                "Initialized ResponsesToCompletionBridgeHandler with custom transformation_handler"
+            )
+
+        ResponsesToCompletionBridgeHandler.__init__ = patched_init
+
+        # Update the existing responses_api_bridge instance
+        if hasattr(responses_api_bridge, "transformation_handler"):
+            responses_api_bridge.transformation_handler = (
+                CustomLiteLLMResponsesTransformationHandler()
+            )
+            logger.debug(
+                "Updated existing responses_api_bridge.transformation_handler with custom implementation"
+            )
+
+        # Marked as patched to prevent duplicate application
+        patch_litellm_responses_handler._patched = True
+        logger.info(
+            "Successfully patched ResponsesToCompletionBridgeHandler.__init__ and updated existing instances"
+        )
+
+    except ImportError as e:
+        logger.warning(f"Failed to patch litellm handler: {e}")
+
+
+#
+# def patch_model_response_to_generate_content_response() -> None:
+#     """Patch _model_response_to_generate_content_response to add raw_response.id to custom_metadata."""
+#     # Prevent duplicate patches
+#     if hasattr(patch_model_response_to_generate_content_response, "_patched"):
+#         logger.debug(
+#             "_model_response_to_generate_content_response already patched, skipping"
+#         )
+#         return
+#
+#     try:
+#         from litellm.types.utils import ModelResponse
+#         from google.adk.models.lite_llm import (
+#             _model_response_to_generate_content_response,
+#         )
+#
+#         original_model_response_to_generate_content_response = (
+#             _model_response_to_generate_content_response
+#         )
+#
+#         def patched_model_response_to_generate_content_response(
+#             response: ModelResponse,
+#         ):
+#             """Patched version that adds raw_response.id to custom_metadata."""
+#             # Call the original function to get the result
+#             llm_response = original_model_response_to_generate_content_response(
+#                 response
+#             )
+#             if not response.id.startswith("chatcmpl"):
+#                 if llm_response.custom_metadata is None:
+#                     llm_response.custom_metadata = {}
+#                 llm_response.custom_metadata["response_id"] = response["id"]
+#             return llm_response
+#
+#         import google.adk.models.lite_llm
+#
+#         google.adk.models.lite_llm._model_response_to_generate_content_response = (
+#             patched_model_response_to_generate_content_response
+#         )
+#
+#         # Prevent duplicate application
+#         patch_model_response_to_generate_content_response._patched = True
+#         logger.info("Successfully patched _model_response_to_generate_content_response")
+#
+#     except ImportError as e:
+#         logger.warning(
+#             f"Failed to patch _model_response_to_generate_content_response: {e}"
+#         )

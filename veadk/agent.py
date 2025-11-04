@@ -123,10 +123,16 @@ class Agent(LlmAgent):
 
         if not self.model:
             if self.enable_responses:
-                from veadk.models.ark_llm import ArkLlm
+                from veadk.utils.patches import (
+                    patch_litellm_responses_handler,
+                )
+                from veadk.models.ark_llm import ArkLiteLlm
 
-                self.model = ArkLlm(
-                    model=f"{self.model_provider}/{self.model_name}",
+                patch_litellm_responses_handler()
+                # patch_model_response_to_generate_content_response()
+                print("!!!! responses api !!!")
+                self.model = ArkLiteLlm(
+                    model=f"{self.model_provider}/responses/{self.model_name}",
                     api_key=self.model_api_key,
                     api_base=self.model_api_base,
                     **self.model_extra_config,
