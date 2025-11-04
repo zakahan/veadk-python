@@ -1,10 +1,11 @@
 import json
-from typing import Any, Dict, AsyncGenerator
+from typing import Any, Dict, AsyncGenerator, Union
 
 from google.adk.models import LlmRequest, LlmResponse
 from litellm import ChatCompletionAssistantMessage
 
 from google.genai import types
+from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
 from litellm.types.utils import ModelResponse, ChatCompletionMessageToolCall, Function
 from pydantic import Field
 import litellm
@@ -29,64 +30,16 @@ litellm.add_function_to_prompt = True
 logger = get_logger(__name__)
 
 
-#
-# class ArkLiteLLMClient(LiteLLMClient):
-#     def __init__(self):
-#         super().__init__()
-#         self.transformation_handler = LiteLLMResponsesTransformationHandler()
-#
-#     async def acompletion(
-#             self, model, messages, tools, **kwargs
-#     ) -> Union[ModelResponse, CustomStreamWrapper]:
-#         optional_params = {
-#             "extra_body": kwargs.get("extra_body", {}),
-#             "tools" : tools
-#         }
-#         litellm_params = get_litellm_params(
-#             **kwargs
-#         )
-#         headers =  kwargs.get("extra_headers", {})
-#         request_data = self.transformation_handler.transform_request(
-#             model=model,
-#             messages=messages,
-#             optional_params=optional_params,
-#             litellm_params=litellm_params,
-#             headers=headers,
-#             litellm_logging_obj=logging_obj,
-#             client=kwargs.get("client"),
-#         )
-#
-#         result = responses(
-#             **request_data,
-#         )
-#
-#         if isinstance(result, ResponsesAPIResponse):
-#             return self.transformation_handler.transform_response(
-#                 model=model,
-#                 raw_response=result,
-#                 model_response=model_response,
-#                 logging_obj=logging_obj,
-#                 request_data=request_data,
-#                 messages=messages,
-#                 optional_params=optional_params,
-#                 litellm_params=litellm_params,
-#                 encoding=kwargs.get("encoding"),
-#                 api_key=kwargs.get("api_key"),
-#                 json_mode=kwargs.get("json_mode"),
-#             )
-#         else:
-#             completion_stream = self.transformation_handler.get_model_response_iterator(
-#                 streaming_response=result,  # type: ignore
-#                 sync_stream=True,
-#                 json_mode=kwargs.get("json_mode"),
-#             )
-#             streamwrapper = CustomStreamWrapper(
-#                 completion_stream=completion_stream,
-#                 model=model,
-#                 custom_llm_provider=custom_llm_provider,
-#                 logging_obj=logging_obj,
-#             )
-#             return streamwrapper
+class ArkLiteLLMClient(LiteLLMClient):
+    def __init__(self):
+        super().__init__()
+
+    async def acompletion(
+        self, model, messages, tools, **kwargs
+    ) -> Union[ModelResponse, CustomStreamWrapper]:
+        return await super().acompletion(model, messages, tools, **kwargs)
+
+
 def _model_response_to_generate_content_response_for_responses_api_handler(
     response: ModelResponse,
 ):
@@ -104,7 +57,7 @@ def _model_response_to_generate_content_response_for_responses_api_handler(
 
 
 class ArkLiteLlm(LiteLlm):
-    llm_client: LiteLLMClient = Field(default_factory=LiteLLMClient)
+    llm_client: ArkLiteLLMClient = Field(default_factory=ArkLiteLLMClient)
     """The LLM client to use for the model."""
 
     _additional_args: Dict[str, Any] = None
@@ -131,7 +84,7 @@ class ArkLiteLlm(LiteLlm):
         messages, tools, response_format, generation_params = _get_completion_inputs(
             llm_request
         )
-        # 获取previous_responses_id
+        # 获取previous_response_id
 
         if "functions" in self._additional_args:
             # LiteLLM does not support both tools and functions together.
@@ -142,7 +95,9 @@ class ArkLiteLlm(LiteLlm):
             "messages": messages,
             "tools": tools,
             "response_format": response_format,
-            # "previous_response_id": llm_request.previous_response_id,
+            "previous_response_id": llm_request.config.labels.get(
+                "previous_response_id", None
+            ),
         }
         completion_args.update(self._additional_args)
 

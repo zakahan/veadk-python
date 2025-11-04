@@ -108,13 +108,13 @@ def patch_litellm_responses_handler() -> None:
             def transform_request(self, *args, **kwargs):
                 result = super().transform_request(*args, **kwargs)
                 # append custom param for responses api
-                previous_responses_id = (
+                previous_response_id = (
                     kwargs.get("optional_params", {})
                     .get("extra_body", {})
                     .get("previous_response_id")
                 )
-                if previous_responses_id:
-                    result["previous_responses_id"] = previous_responses_id
+                if previous_response_id:
+                    result["previous_response_id"] = previous_response_id
                 return result
 
             def transform_response(self, *args, **kwargs):
@@ -150,6 +150,60 @@ def patch_litellm_responses_handler() -> None:
 
     except ImportError as e:
         logger.warning(f"Failed to patch litellm handler: {e}")
+
+
+#
+# BaseLlmFlow._call_llm_async patch hook
+#
+def patch_google_adk_call_llm_async() -> None:
+    """Patch google.adk BaseLlmFlow._call_llm_async with a delegating wrapper.
+
+    Current behavior: simply calls the original implementation and yields its results.
+    This provides a stable hook for later custom business logic without changing behavior now.
+    """
+    # Prevent duplicate patches
+    if hasattr(patch_google_adk_call_llm_async, "_patched"):
+        logger.debug("BaseLlmFlow._call_llm_async already patched, skipping")
+        return
+
+    try:
+        from google.adk.flows.llm_flows.base_llm_flow import BaseLlmFlow
+        from google.genai import types
+
+        original_call_llm_async = BaseLlmFlow._call_llm_async
+
+        async def patched_call_llm_async(
+            self, invocation_context, llm_request, model_response_event
+        ):
+            logger.debug(
+                "Patched BaseLlmFlow._call_llm_async invoked; delegating to original"
+            )
+            llm_request.config = llm_request.config or types.GenerateContentConfig()
+            llm_request.config.labels = llm_request.config.labels or {}
+            events = invocation_context.session.events
+            if (
+                events
+                and len(events) >= 2
+                and events[-2].custom_metadata
+                and "response_id" in events[-2].custom_metadata
+            ):
+                llm_request.config.labels["previous_response_id"] = events[
+                    -2
+                ].custom_metadata["response_id"]
+            async for llm_response in original_call_llm_async(
+                self, invocation_context, llm_request, model_response_event
+            ):
+                # Currently, just pass through the original responses
+                yield llm_response
+
+        BaseLlmFlow._call_llm_async = patched_call_llm_async
+
+        # Marked as patched to prevent duplicate application
+        patch_google_adk_call_llm_async._patched = True
+        logger.info("Successfully patched BaseLlmFlow._call_llm_async")
+
+    except ImportError as e:
+        logger.warning(f"Failed to patch BaseLlmFlow._call_llm_async: {e}")
 
 
 #

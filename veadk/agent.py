@@ -125,9 +125,11 @@ class Agent(LlmAgent):
             if self.enable_responses:
                 from veadk.utils.patches import (
                     patch_litellm_responses_handler,
+                    patch_google_adk_call_llm_async,
                 )
                 from veadk.models.ark_llm import ArkLiteLlm
 
+                patch_google_adk_call_llm_async()
                 patch_litellm_responses_handler()
                 # patch_model_response_to_generate_content_response()
                 print("!!!! responses api !!!")
