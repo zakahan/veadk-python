@@ -14,22 +14,29 @@
 
 # adapted from Google ADK models adk-python/blob/main/src/google/adk/models/lite_llm.py at f1f44675e4a86b75e72cfd838efd8a0399f23e24 · google/adk-python
 
+import base64
 import json
 from typing import Any, Dict, Union, AsyncGenerator, Tuple, List, Optional, Literal
 
 import openai
-from openai.types.responses import (
+from openai.types.responses import Response as OpenAITypeResponse, ResponseStreamEvent
+from volcenginesdkarkruntime.types.responses import FunctionToolParam
+
+from volcenginesdkarkruntime.types.responses.response_input_param import (
     ResponseInputItemParam,
     ResponseFunctionToolCallParam,
     EasyInputMessageParam,
+    FunctionCallOutput
 )
-from openai.types.responses.response_input_message_content_list_param import (
-    ResponseInputFileParam,
+from volcenginesdkarkruntime.types.responses.response_input_message_content_list_param import (
     ResponseInputTextParam,
+    ResponseInputImageParam,
+    ResponseInputVideoParam,
+    ResponseInputAudioParam,
+    ResponseInputFileParam,
+    ResponseInputContentParam
 )
 
-# openai/types/responses/response_input_message_content_list_param.py
-from openai.types.responses import Response as OpenAITypeResponse, ResponseStreamEvent
 
 from google.adk.models import LlmRequest, LlmResponse
 from google.adk.models.lite_llm import (
@@ -46,7 +53,6 @@ from litellm.types.utils import (
     ChatCompletionMessageToolCall,
     Function,
 )
-from openai.types.responses.response_input_item_param import FunctionCallOutput
 from pydantic import Field
 from volcenginesdkarkruntime import AsyncArk
 
@@ -83,7 +89,87 @@ def _safe_json_serialize(obj) -> str:  # fixme: 这个可能得修改，可能�
         return str(obj)
 
 
-def _get_content(parts: List[types.Part], role: str) -> Optional[EasyInputMessageParam]:
+def _file_data_to_content_param(
+    part: types.Part,
+) -> ResponseInputContentParam:
+    file_uri = part.file_data.file_uri
+    mime_type = part.file_data.mime_type
+    display_name = part.file_data.display_name
+    fps = 1.0
+    if getattr(part, "video_metadata", None):
+        video_metadata = part.video_metadata
+        if isinstance(video_metadata, dict):
+            fps = video_metadata.get("fps")
+        else:
+            fps = getattr(video_metadata, "fps", 1)
+
+    is_file_id = file_uri.startswith("file_id:")
+    value = file_uri[7:] if is_file_id else file_uri
+    # video
+    if mime_type.startswith("video/"):
+        param = {"file_id": value} if is_file_id else {"video_url": value}
+        if fps is not None:
+            param["fps"] = fps
+        return ResponseInputVideoParam(
+            type="input_video",
+            **param,
+        )
+    # image
+    if mime_type.startswith("image/"):
+        return ResponseInputImageParam(
+            type="input_image",
+            detail="auto",
+            **({"file_id": value} if is_file_id else {"image_url": value}),
+        )
+    # file
+    param = {"file_id": value} if is_file_id else {"file_url": value}
+    if display_name:
+        param['filename'] = display_name
+    return ResponseInputFileParam(
+        type="input_file",
+        **param,
+    )
+
+
+def _inline_data_to_content_param(part: types.Part) -> ResponseInputContentParam:
+    mime_type = (part.inline_data.mime_type if part.inline_data else None) or "application/octet-stream"
+    base64_string = base64.b64encode(part.inline_data.data).decode("utf-8")
+    data_uri = f"data:{mime_type};base64,{base64_string}"
+
+    if mime_type.startswith("image"):
+        return ResponseInputImageParam(
+            type="input_image",
+            image_url=data_uri,
+            detail="auto",
+        )
+    if mime_type.startswith("video"):
+        param: Dict[str, Any] = {"video_url": data_uri}
+        if getattr(part, "video_metadata", None):
+            video_metadata = part.video_metadata
+            if isinstance(video_metadata, dict):
+                fps = video_metadata.get("fps")
+            else:
+                fps = getattr(video_metadata, "fps", None)
+            if fps is not None:
+                param["fps"] = fps
+        return ResponseInputVideoParam(
+            type="input_video",
+            **param,
+        )
+
+    file_param: Dict[str, Any] = {"file_data": data_uri}
+    if getattr(part.inline_data, "display_name", None):
+        file_param["filename"] = part.inline_data.display_name
+    return ResponseInputFileParam(
+        type="input_file",
+        **file_param,
+    )
+
+
+def _get_content(
+        parts: List[types.Part],
+        role: Literal["user", "system", "developer", "assistant"],
+) -> Optional[EasyInputMessageParam]:
     content = []
     for part in parts:
         if part.text:
@@ -93,15 +179,18 @@ def _get_content(parts: List[types.Part], role: str) -> Optional[EasyInputMessag
                     text=part.text,
                 )
             )
+        elif part.inline_data and part.inline_data.data:
+            content.append(_inline_data_to_content_param(part))
         elif part.file_data:  # 有两种，file_id和file_url
-            content.append(
-                ResponseInputFileParam(
-                    type="input_file", file_id=part.file_data.file_uri
-                )
-            )
-
-    pass
-
+            content.append(_file_data_to_content_param(part))
+    if len(content)>0:
+        return EasyInputMessageParam(
+            type="message",
+            role=role,
+            content=content
+        )
+    else:
+        return None
 
 def _content_to_input_item(
     content: types.Content,
@@ -122,12 +211,13 @@ def _content_to_input_item(
     if input_list:
         return input_list if len(input_list) > 1 else input_list[0]
 
-    input_content = _get_content(content.parts) or None
+    input_content = _get_content(content.parts, role=role) or None
 
     if role == "user":
         # 2. 处理user的消息
         # user_content 只可能是一条
-        ...
+        if input_content:
+            return input_content
     else:  # model
         # 3. 处理model的消息
         content_present = False
@@ -143,19 +233,63 @@ def _content_to_input_item(
                 )
             # 我怀疑这种输入param里同时有text和function_call的情况绝对很少了
             elif part.text or part.inline_data:
-                input_list.append()
-
+                if input_content:
+                    input_list.append(input_content)
     return input_list
+
+
+def _function_declarations_to_tool_param(
+        function_declaration: types.FunctionDeclaration
+) -> FunctionToolParam:
+    assert function_declaration.name
+    tool_params = FunctionToolParam(
+        name=function_declaration.name,
+        parameters=...,     # todo:here
+        type="function",
+        description=function_declaration.description,
+    )
+
 
 
 async def _get_responses_inputs(
     llm_request: LlmRequest,
     model: str,
 ) -> Tuple:
-    inputs: List[ResponseInputItemParam] = []  # noqa
+    inputs: List[ResponseInputItemParam] = []
     for content in llm_request.contents or []:
         # 每个content，代表`一次对话`，这`一次对话`可能有`多个内容`，但不可能有`多个对话`
-        input_item = _content_to_input_item(content)  # noqa
+        input_item_or_list = _content_to_input_item(content)
+        if isinstance(input_item_or_list,list):
+            inputs.extend(input_item_or_list)
+        elif input_item_or_list:
+            inputs.append(input_item_or_list)
+
+    # 将system_prompt插入到开头
+    if llm_request.config.system_instruction:
+        inputs.insert(
+            0,
+            EasyInputMessageParam(
+                role="system",
+                type="message",
+                content=[ResponseInputTextParam(
+                    type="input_text",
+                    text=llm_request.config.system_instruction,
+                )]
+            )
+        )
+
+    # 2. Convert tool declarations
+    tools: Optional[List[FunctionToolParam]] = None
+    if (
+        llm_request.config
+        and llm_request.config.tools
+        and llm_request.config.tools[0].function_declarations
+    ):
+        tools = [
+            _function_declarations_to_tool_param(tool)
+            for tool in llm_request.config.tools[0].function_declarations
+        ]
+
 
 
 class ArkLlmClient:
