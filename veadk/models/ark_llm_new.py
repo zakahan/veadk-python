@@ -20,7 +20,8 @@ from typing import Any, Dict, Union, AsyncGenerator, Tuple, List, Optional, Lite
 
 import openai
 from openai.types.responses import Response as OpenAITypeResponse, ResponseStreamEvent
-from volcenginesdkarkruntime.types.responses import FunctionToolParam
+from volcenginesdkarkruntime.types import ResponseFormatJSONObject
+from volcenginesdkarkruntime.types.responses import FunctionToolParam, ResponseTextConfigParam
 
 from volcenginesdkarkruntime.types.responses.response_input_param import (
     ResponseInputItemParam,
@@ -53,7 +54,7 @@ from litellm.types.utils import (
     ChatCompletionMessageToolCall,
     Function,
 )
-from pydantic import Field
+from pydantic import Field, BaseModel
 from volcenginesdkarkruntime import AsyncArk
 
 from veadk.config import settings
@@ -65,6 +66,8 @@ from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+_LITELLM_STRUCTURED_TYPES = {"json_object", "json_schema"}
 
 def _to_responses_api_role(role: Optional[str]) -> Literal["user", "assistant"]:
     if role in ["model", "assistant"]:
@@ -241,32 +244,66 @@ def _content_to_input_item(
 def _function_declarations_to_tool_param(
         function_declaration: types.FunctionDeclaration
 ) -> FunctionToolParam:
+    from google.adk.models.lite_llm import _schema_to_dict
     assert function_declaration.name
+
+    parameters = {
+        "type": "object",
+        "properties" : {}
+    }
+    if (
+        function_declaration.parameters
+        and function_declaration.parameters.properties
+    ):
+        properties = {}
+        for key, value in function_declaration.parameters.properties.items():
+            properties[key] = _schema_to_dict(value)
+
+        parameters = {
+            "type": "object",
+            "properties": properties,
+        }
+    elif function_declaration.parameters_json_schema:
+        parameters = function_declaration.parameters_json_schema
+
     tool_params = FunctionToolParam(
         name=function_declaration.name,
-        parameters=...,     # todo:here
+        parameters=parameters,     # todo:here
         type="function",
         description=function_declaration.description,
     )
 
+    return tool_params
+
+
+def _responses_schema_to_text(response_schema:types.SchemaUnion) -> Optional[ResponseTextConfigParam]:
+    from google.adk.models.lite_llm import _to_litellm_response_format
+    format_value = _to_litellm_response_format(
+        response_schema
+    )
+    if format_value:
+        return ResponseTextConfigParam(
+            format=format_value
+        )
+    else:
+        return None
 
 
 async def _get_responses_inputs(
     llm_request: LlmRequest,
-    model: str,
 ) -> Tuple:
-    inputs: List[ResponseInputItemParam] = []
+    input_params: List[ResponseInputItemParam] = []
     for content in llm_request.contents or []:
         # 每个content，代表`一次对话`，这`一次对话`可能有`多个内容`，但不可能有`多个对话`
         input_item_or_list = _content_to_input_item(content)
         if isinstance(input_item_or_list,list):
-            inputs.extend(input_item_or_list)
+            input_params.extend(input_item_or_list)
         elif input_item_or_list:
-            inputs.append(input_item_or_list)
+            input_params.append(input_item_or_list)
 
     # 将system_prompt插入到开头
     if llm_request.config.system_instruction:
-        inputs.insert(
+        input_params.insert(
             0,
             EasyInputMessageParam(
                 role="system",
@@ -289,6 +326,39 @@ async def _get_responses_inputs(
             _function_declarations_to_tool_param(tool)
             for tool in llm_request.config.tools[0].function_declarations
         ]
+
+    # 3. Handle output-schema -> `text`
+    text: Optional[ResponseTextConfigParam] = None
+    if llm_request.config and llm_request.config.response_schema:
+        text = _responses_schema_to_text(
+            llm_request.config.response_schema
+        )
+
+    # 4. Extract generation parameters
+    generation_params: Optional[Dict] = None
+    if llm_request.config:
+        config_dict = llm_request.config.model_dump(exclude_none=True)
+        generation_params = {}
+        param_mapping = {
+            "max_output_tokens": "max_completion_tokens",
+            "stop_sequences": "stop",
+        }
+        for key in (
+                "temperature",
+                "max_output_tokens",
+                "top_p",
+                "top_k",
+                "stop_sequences",
+                "presence_penalty",
+                "frequency_penalty",
+        ):
+            if key in config_dict:
+                mapped_key = param_mapping.get(key, key)
+                generation_params[mapped_key] = config_dict[key]
+
+        if not generation_params:
+            generation_params = None
+    return input_params, tools, text, generation_params
 
 
 
@@ -335,7 +405,7 @@ class ArkLlm(LiteLlm):
         self._maybe_append_user_content(llm_request)
         # logger.debug(_build_request_log(llm_request))
 
-        messages, tools, response_format, generation_params = _get_completion_inputs(
+        input_param, tools, text_format, generation_params = _get_responses_inputs(
             llm_request
         )
 
@@ -347,30 +417,30 @@ class ArkLlm(LiteLlm):
         previous_response_id = None
         if llm_request.cache_metadata and llm_request.cache_metadata.cache_name:
             previous_response_id = llm_request.cache_metadata.cache_name
-        completion_args = {
+        responses_args = {
             "model": self.model,
-            "messages": messages,
+            "input": input_param,
             "tools": tools,
-            "response_format": response_format,
+            "text": text_format,
             "previous_response_id": previous_response_id,  # supply previous_response_id
         }
         # ------------------------------------------------------ #
-        completion_args.update(self._additional_args)
+        responses_args.update(self._additional_args)
 
         if generation_params:
-            completion_args.update(generation_params)
-        response_args = self.transform_handler.transform_request(**completion_args)
+            responses_args.update(generation_params)
+        responses_args = self.transform_handler.transform_request(**responses_args)
 
         if stream:
-            text = ""
+            text_format = ""
             # Track function calls by index
             function_calls = {}  # index -> {name, args, id}
-            response_args["stream"] = True
+            responses_args["stream"] = True
             aggregated_llm_response = None
             aggregated_llm_response_with_tool_call = None
             usage_metadata = None
             fallback_index = 0
-            raw_response = await self.llm_client.aresponse(**response_args)
+            raw_response = await self.llm_client.aresponse(**responses_args)
             async for part in raw_response:
                 for (
                     model_response,
@@ -401,7 +471,7 @@ class ArkLlm(LiteLlm):
                             chunk.id or function_calls[index]["id"] or str(index)
                         )
                     elif isinstance(chunk, TextChunk):
-                        text += chunk.text
+                        text_format += chunk.text
                         yield _message_to_generate_content_response(
                             ChatCompletionAssistantMessage(
                                 role="assistant",
@@ -445,7 +515,7 @@ class ArkLlm(LiteLlm):
                             _message_to_generate_content_response(
                                 ChatCompletionAssistantMessage(
                                     role="assistant",
-                                    content=text,
+                                    content=text_format,
                                     tool_calls=tool_calls,
                                 )
                             )
@@ -455,12 +525,12 @@ class ArkLlm(LiteLlm):
                             aggregated_llm_response_with_tool_call,
                             stream=True,
                         )
-                        text = ""
+                        text_format = ""
                         function_calls.clear()
-                    elif finish_reason == "stop" and text:
+                    elif finish_reason == "stop" and text_format:
                         aggregated_llm_response = _message_to_generate_content_response(
                             ChatCompletionAssistantMessage(
-                                role="assistant", content=text
+                                role="assistant", content=text_format
                             )
                         )
                         self.transform_handler.adapt_responses_api(
@@ -468,7 +538,7 @@ class ArkLlm(LiteLlm):
                             aggregated_llm_response,
                             stream=True,
                         )
-                        text = ""
+                        text_format = ""
 
             # waiting until streaming ends to yield the llm_response as litellm tends
             # to send chunk that contains usage_metadata after the chunk with
@@ -487,7 +557,7 @@ class ArkLlm(LiteLlm):
                 yield aggregated_llm_response_with_tool_call
 
         else:
-            raw_response = await self.llm_client.aresponse(**response_args)
+            raw_response = await self.llm_client.aresponse(**responses_args)
             for (
                 llm_response
             ) in self.transform_handler.openai_response_to_generate_content_response(
