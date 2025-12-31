@@ -19,30 +19,31 @@ import json
 from typing import Any, Dict, Union, AsyncGenerator, Tuple, List, Optional, Literal
 
 import openai
-from openai.types.responses import Response as OpenAITypeResponse, ResponseStreamEvent
-from volcenginesdkarkruntime.types import ResponseFormatJSONObject
-from volcenginesdkarkruntime.types.responses import FunctionToolParam, ResponseTextConfigParam
+from openai.types.responses import ResponseStreamEvent
+from volcenginesdkarkruntime.types.responses import Response as ArkTypeResponse
+from volcenginesdkarkruntime.types.responses import (
+    FunctionToolParam,
+    ResponseTextConfigParam,
+)
 
 from volcenginesdkarkruntime.types.responses.response_input_param import (
     ResponseInputItemParam,
     ResponseFunctionToolCallParam,
     EasyInputMessageParam,
-    FunctionCallOutput
+    FunctionCallOutput,
 )
 from volcenginesdkarkruntime.types.responses.response_input_message_content_list_param import (
     ResponseInputTextParam,
     ResponseInputImageParam,
     ResponseInputVideoParam,
-    ResponseInputAudioParam,
     ResponseInputFileParam,
-    ResponseInputContentParam
+    ResponseInputContentParam,
 )
 
 
 from google.adk.models import LlmRequest, LlmResponse
 from google.adk.models.lite_llm import (
     LiteLlm,
-    _get_completion_inputs,
     FunctionChunk,
     TextChunk,
     _message_to_generate_content_response,
@@ -59,8 +60,9 @@ from volcenginesdkarkruntime import AsyncArk
 
 from veadk.config import settings
 from veadk.consts import DEFAULT_VIDEO_MODEL_API_BASE
-from veadk.models.ark_transform import (
-    CompletionToResponsesAPIHandler,
+from veadk.models.ark_transform_new import (
+    request_reorganization_by_ark,
+    ark_response_to_generate_content_response,
 )
 from veadk.utils.logger import get_logger
 
@@ -68,6 +70,7 @@ logger = get_logger(__name__)
 
 
 _LITELLM_STRUCTURED_TYPES = {"json_object", "json_schema"}
+
 
 def _to_responses_api_role(role: Optional[str]) -> Literal["user", "assistant"]:
     if role in ["model", "assistant"]:
@@ -127,7 +130,7 @@ def _file_data_to_content_param(
     # file
     param = {"file_id": value} if is_file_id else {"file_url": value}
     if display_name:
-        param['filename'] = display_name
+        param["filename"] = display_name
     return ResponseInputFileParam(
         type="input_file",
         **param,
@@ -135,7 +138,9 @@ def _file_data_to_content_param(
 
 
 def _inline_data_to_content_param(part: types.Part) -> ResponseInputContentParam:
-    mime_type = (part.inline_data.mime_type if part.inline_data else None) or "application/octet-stream"
+    mime_type = (
+        part.inline_data.mime_type if part.inline_data else None
+    ) or "application/octet-stream"
     base64_string = base64.b64encode(part.inline_data.data).decode("utf-8")
     data_uri = f"data:{mime_type};base64,{base64_string}"
 
@@ -170,8 +175,8 @@ def _inline_data_to_content_param(part: types.Part) -> ResponseInputContentParam
 
 
 def _get_content(
-        parts: List[types.Part],
-        role: Literal["user", "system", "developer", "assistant"],
+    parts: List[types.Part],
+    role: Literal["user", "system", "developer", "assistant"],
 ) -> Optional[EasyInputMessageParam]:
     content = []
     for part in parts:
@@ -186,14 +191,11 @@ def _get_content(
             content.append(_inline_data_to_content_param(part))
         elif part.file_data:  # 有两种，file_id和file_url
             content.append(_file_data_to_content_param(part))
-    if len(content)>0:
-        return EasyInputMessageParam(
-            type="message",
-            role=role,
-            content=content
-        )
+    if len(content) > 0:
+        return EasyInputMessageParam(type="message", role=role, content=content)
     else:
         return None
+
 
 def _content_to_input_item(
     content: types.Content,
@@ -223,7 +225,6 @@ def _content_to_input_item(
             return input_content
     else:  # model
         # 3. 处理model的消息
-        content_present = False
         for part in content.parts:
             if part.function_call:
                 input_list.append(
@@ -242,19 +243,14 @@ def _content_to_input_item(
 
 
 def _function_declarations_to_tool_param(
-        function_declaration: types.FunctionDeclaration
+    function_declaration: types.FunctionDeclaration,
 ) -> FunctionToolParam:
     from google.adk.models.lite_llm import _schema_to_dict
+
     assert function_declaration.name
 
-    parameters = {
-        "type": "object",
-        "properties" : {}
-    }
-    if (
-        function_declaration.parameters
-        and function_declaration.parameters.properties
-    ):
+    parameters = {"type": "object", "properties": {}}
+    if function_declaration.parameters and function_declaration.parameters.properties:
         properties = {}
         for key, value in function_declaration.parameters.properties.items():
             properties[key] = _schema_to_dict(value)
@@ -268,7 +264,7 @@ def _function_declarations_to_tool_param(
 
     tool_params = FunctionToolParam(
         name=function_declaration.name,
-        parameters=parameters,     # todo:here
+        parameters=parameters,  # todo:here
         type="function",
         description=function_declaration.description,
     )
@@ -276,44 +272,71 @@ def _function_declarations_to_tool_param(
     return tool_params
 
 
-def _responses_schema_to_text(response_schema:types.SchemaUnion) -> Optional[ResponseTextConfigParam]:
-    from google.adk.models.lite_llm import _to_litellm_response_format
-    format_value = _to_litellm_response_format(
-        response_schema
-    )
-    if format_value:
-        return ResponseTextConfigParam(
-            format=format_value
-        )
+def _responses_schema_to_text(
+    response_schema: types.SchemaUnion,
+) -> Optional[ResponseTextConfigParam | dict]:
+    schema_name = ""
+    if isinstance(response_schema, dict):
+        schema_type = response_schema.get("type")
+        if (
+            isinstance(schema_type, str)
+            and schema_type.lower() in _LITELLM_STRUCTURED_TYPES
+        ):
+            return response_schema
+        schema_dict = dict(response_schema)
+    elif isinstance(response_schema, type) and issubclass(response_schema, BaseModel):
+        schema_name = response_schema.__name__
+        schema_dict = response_schema.model_json_schema()
+    elif isinstance(response_schema, BaseModel):
+        if isinstance(response_schema, types.Schema):
+            # GenAI Schema instances already represent JSON schema definitions.
+            schema_name = response_schema.__name__
+            schema_dict = response_schema.model_dump(exclude_none=True, mode="json")
+        else:
+            schema_name = response_schema.__name__
+            schema_dict = response_schema.__class__.model_json_schema()
+    elif hasattr(response_schema, "model_dump"):
+        schema_name = response_schema.__name__
+        schema_dict = response_schema.model_dump(exclude_none=True, mode="json")
     else:
+        logger.warning(
+            "Unsupported response_schema type %s for LiteLLM structured outputs.",
+            type(response_schema),
+        )
         return None
 
+    return ResponseTextConfigParam(
+        format={
+            "type": "json_schema",
+            "name": schema_name,
+            "schema": schema_dict,
+            "strict": True,
+        }
+    )
 
-async def _get_responses_inputs(
+
+def _get_responses_inputs(
     llm_request: LlmRequest,
-) -> Tuple:
-    input_params: List[ResponseInputItemParam] = []
+) -> Tuple[
+    Optional[str],
+    Optional[List[ResponseInputItemParam]],
+    Optional[List[FunctionToolParam]],
+    Optional[ResponseTextConfigParam],
+    Optional[Dict],
+]:
+    # 0. instruction(system prompt)
+    instruction: Optional[str] = None
+    if llm_request.config and llm_request.config.system_instruction:
+        instruction = llm_request.config.system_instruction
+    # 1. input
+    input_params: Optional[List[ResponseInputItemParam]] = []
     for content in llm_request.contents or []:
         # 每个content，代表`一次对话`，这`一次对话`可能有`多个内容`，但不可能有`多个对话`
         input_item_or_list = _content_to_input_item(content)
-        if isinstance(input_item_or_list,list):
+        if isinstance(input_item_or_list, list):
             input_params.extend(input_item_or_list)
         elif input_item_or_list:
             input_params.append(input_item_or_list)
-
-    # 将system_prompt插入到开头
-    if llm_request.config.system_instruction:
-        input_params.insert(
-            0,
-            EasyInputMessageParam(
-                role="system",
-                type="message",
-                content=[ResponseInputTextParam(
-                    type="input_text",
-                    text=llm_request.config.system_instruction,
-                )]
-            )
-        )
 
     # 2. Convert tool declarations
     tools: Optional[List[FunctionToolParam]] = None
@@ -330,9 +353,7 @@ async def _get_responses_inputs(
     # 3. Handle output-schema -> `text`
     text: Optional[ResponseTextConfigParam] = None
     if llm_request.config and llm_request.config.response_schema:
-        text = _responses_schema_to_text(
-            llm_request.config.response_schema
-        )
+        text = _responses_schema_to_text(llm_request.config.response_schema)
 
     # 4. Extract generation parameters
     generation_params: Optional[Dict] = None
@@ -344,13 +365,13 @@ async def _get_responses_inputs(
             "stop_sequences": "stop",
         }
         for key in (
-                "temperature",
-                "max_output_tokens",
-                "top_p",
-                "top_k",
-                "stop_sequences",
-                "presence_penalty",
-                "frequency_penalty",
+            "temperature",
+            "max_output_tokens",
+            "top_p",
+            "top_k",
+            "stop_sequences",
+            "presence_penalty",
+            "frequency_penalty",
         ):
             if key in config_dict:
                 mapped_key = param_mapping.get(key, key)
@@ -358,14 +379,13 @@ async def _get_responses_inputs(
 
         if not generation_params:
             generation_params = None
-    return input_params, tools, text, generation_params
-
+    return instruction, input_params, tools, text, generation_params
 
 
 class ArkLlmClient:
     async def aresponse(
         self, **kwargs
-    ) -> Union[OpenAITypeResponse, openai.AsyncStream[ResponseStreamEvent]]:
+    ) -> Union[ArkTypeResponse, openai.AsyncStream[ResponseStreamEvent]]:
         # 1. Get request params
         api_base = kwargs.pop("api_base", DEFAULT_VIDEO_MODEL_API_BASE)
         api_key = kwargs.pop("api_key", settings.model.api_key)
@@ -383,9 +403,6 @@ class ArkLlmClient:
 class ArkLlm(LiteLlm):
     llm_client: ArkLlmClient = Field(default_factory=ArkLlmClient)
     _additional_args: Dict[str, Any] = None
-    transform_handler: CompletionToResponsesAPIHandler = Field(
-        default_factory=CompletionToResponsesAPIHandler
-    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -405,8 +422,8 @@ class ArkLlm(LiteLlm):
         self._maybe_append_user_content(llm_request)
         # logger.debug(_build_request_log(llm_request))
 
-        input_param, tools, text_format, generation_params = _get_responses_inputs(
-            llm_request
+        instruction, input_param, tools, text_format, generation_params = (
+            _get_responses_inputs(llm_request)
         )
 
         if "functions" in self._additional_args:
@@ -419,6 +436,7 @@ class ArkLlm(LiteLlm):
             previous_response_id = llm_request.cache_metadata.cache_name
         responses_args = {
             "model": self.model,
+            "instruction": instruction,
             "input": input_param,
             "tools": tools,
             "text": text_format,
@@ -429,7 +447,7 @@ class ArkLlm(LiteLlm):
 
         if generation_params:
             responses_args.update(generation_params)
-        responses_args = self.transform_handler.transform_request(**responses_args)
+        responses_args = request_reorganization_by_ark(responses_args)
 
         if stream:
             text_format = ""
@@ -558,9 +576,5 @@ class ArkLlm(LiteLlm):
 
         else:
             raw_response = await self.llm_client.aresponse(**responses_args)
-            for (
-                llm_response
-            ) in self.transform_handler.openai_response_to_generate_content_response(
-                llm_request, raw_response
-            ):
-                yield llm_response
+            llm_response = ark_response_to_generate_content_response(raw_response)
+            yield llm_response
