@@ -1,7 +1,8 @@
 import json
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from google.adk.models import LlmResponse
+from google.adk.models.cache_metadata import CacheMetadata
 from google.genai import types
 from volcenginesdkarkruntime.types.responses import (
     EasyInputMessageParam,
@@ -13,6 +14,9 @@ from volcenginesdkarkruntime.types.responses import (
     ResponseOutputText,
 )
 from volcenginesdkarkruntime.types.responses import Response as ArkTypeResponse
+from volcenginesdkarkruntime.types.responses.response_input_param import (
+    ResponseInputItemParam,
+)
 
 from veadk.utils.logger import get_logger
 
@@ -61,7 +65,37 @@ ark_supported_fields = [
 ]
 
 
-def openai_field_reorganization(request_data: dict) -> dict:
+def build_cache_metadata(response_id: str) -> CacheMetadata:
+    """Create a new CacheMetadata instance for agent response tracking.
+
+    Args:
+        response_id: Response ID to track
+
+    Returns:
+        A new CacheMetadata instance with the agent-response mapping
+    """
+    if "contents_count" in CacheMetadata.model_fields:  # adk >= 1.17
+        cache_metadata = CacheMetadata(
+            cache_name=response_id,
+            expire_time=0,
+            fingerprint="",
+            invocations_used=0,
+            contents_count=0,
+        )
+    else:  # 1.15 <= adk < 1.17
+        cache_metadata = CacheMetadata(
+            cache_name=response_id,
+            expire_time=0,
+            fingerprint="",
+            invocations_used=0,
+            cached_contents_count=0,
+        )
+    return cache_metadata
+
+
+# ---------------------------------------
+# input transfer ------------------------
+def get_model_without_provider(request_data: dict) -> dict:
     model = request_data.get("model")
 
     if not isinstance(model, str):
@@ -85,6 +119,21 @@ def openai_field_reorganization(request_data: dict) -> dict:
     return request_data
 
 
+def filtered_inputs(
+    inputs: List[ResponseInputItemParam],
+) -> List[ResponseInputItemParam]:
+    # Keep the first message and all consecutive user messages from the end
+    # Collect all consecutive user messages from the end
+    new_inputs = []
+    for m in reversed(inputs):  # Skip the first message
+        if m.get("type") == "function_call_output" or m.get("role") == "user":
+            new_inputs.append(m)
+        else:
+            break  # Stop when we encounter a non-user message
+
+    return new_inputs[::-1]
+
+
 def _is_caching_enabled(request_data: dict) -> bool:
     extra_body = request_data.get("extra_body")
     if not isinstance(extra_body, dict):
@@ -103,10 +152,13 @@ def _remove_caching(request_data: dict) -> None:
 
 
 def request_reorganization_by_ark(request_data: Dict) -> Dict:
-    # model provider
-    request_data = openai_field_reorganization(request_data)
+    # 1. model provider
+    request_data = get_model_without_provider(request_data)
 
-    # filter not support data
+    # 2. filtered input
+    request_data["input"] = filtered_inputs(request_data["input"])
+
+    # 3. filter not support data
     request_data = {
         key: value for key, value in request_data.items() if key in ark_supported_fields
     }
@@ -141,8 +193,8 @@ def request_reorganization_by_ark(request_data: Dict) -> Dict:
     # Due to the Volcano Ark settings, there is a conflict between the cache and the instructions field.
     # If a system prompt is needed, it should be placed in the system role message within the input, instead of using the instructions parameter.
     # https://www.volcengine.com/docs/82379/1585128
-    instructions = request_data.pop("instructions", None)
-    if instructions and isinstance(instructions, str):
+    instructions: Optional[str] = request_data.pop("instructions", None)
+    if instructions and not request_data.get("previous_response_id"):
         request_data["input"].insert(
             0,
             EasyInputMessageParam(
@@ -158,6 +210,10 @@ def request_reorganization_by_ark(request_data: Dict) -> Dict:
         )
 
     return request_data
+
+
+# ---------------------------------------
+# output transfer -----------------------
 
 
 def _output_to_generate_content_response(
@@ -228,5 +284,9 @@ def ark_response_to_generate_content_response(
             total_token_count=raw_response.usage.total_tokens,
             cached_content_token_count=raw_response.usage.input_tokens_details.cached_tokens,
         )
+
+    # previous_response_id
+    previous_response_id = raw_response.id
+    llm_response.cache_metadata = build_cache_metadata(previous_response_id)
 
     return llm_response

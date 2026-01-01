@@ -324,10 +324,10 @@ def _get_responses_inputs(
     Optional[ResponseTextConfigParam],
     Optional[Dict],
 ]:
-    # 0. instruction(system prompt)
-    instruction: Optional[str] = None
+    # 0. instructions(system prompt)
+    instructions: Optional[str] = None
     if llm_request.config and llm_request.config.system_instruction:
-        instruction = llm_request.config.system_instruction
+        instructions = llm_request.config.system_instruction
     # 1. input
     input_params: Optional[List[ResponseInputItemParam]] = []
     for content in llm_request.contents or []:
@@ -379,7 +379,7 @@ def _get_responses_inputs(
 
         if not generation_params:
             generation_params = None
-    return instruction, input_params, tools, text, generation_params
+    return instructions, input_params, tools, text, generation_params
 
 
 class ArkLlmClient:
@@ -422,7 +422,7 @@ class ArkLlm(LiteLlm):
         self._maybe_append_user_content(llm_request)
         # logger.debug(_build_request_log(llm_request))
 
-        instruction, input_param, tools, text_format, generation_params = (
+        instructions, input_param, tools, text_format, generation_params = (
             _get_responses_inputs(llm_request)
         )
 
@@ -436,7 +436,7 @@ class ArkLlm(LiteLlm):
             previous_response_id = llm_request.cache_metadata.cache_name
         responses_args = {
             "model": self.model,
-            "instruction": instruction,
+            "instructions": instructions,
             "input": input_param,
             "tools": tools,
             "text": text_format,
