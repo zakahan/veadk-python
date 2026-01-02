@@ -18,19 +18,21 @@ import base64
 import json
 from typing import Any, Dict, Union, AsyncGenerator, Tuple, List, Optional, Literal
 
-import openai
-from openai.types.responses import ResponseStreamEvent
-from volcenginesdkarkruntime.types.responses import Response as ArkTypeResponse
+from google.adk.models import LlmRequest, LlmResponse
+from google.adk.models.lite_llm import (
+    LiteLlm,
+)
+from google.genai import types
+from pydantic import Field, BaseModel
+from volcenginesdkarkruntime import AsyncArk
+from volcenginesdkarkruntime._streaming import AsyncStream
 from volcenginesdkarkruntime.types.responses import (
     FunctionToolParam,
     ResponseTextConfigParam,
 )
-
-from volcenginesdkarkruntime.types.responses.response_input_param import (
-    ResponseInputItemParam,
-    ResponseFunctionToolCallParam,
-    EasyInputMessageParam,
-    FunctionCallOutput,
+from volcenginesdkarkruntime.types.responses import (
+    Response as ArkTypeResponse,
+    ResponseStreamEvent,
 )
 from volcenginesdkarkruntime.types.responses.response_input_message_content_list_param import (
     ResponseInputTextParam,
@@ -39,37 +41,26 @@ from volcenginesdkarkruntime.types.responses.response_input_message_content_list
     ResponseInputFileParam,
     ResponseInputContentParam,
 )
-
-
-from google.adk.models import LlmRequest, LlmResponse
-from google.adk.models.lite_llm import (
-    LiteLlm,
-    FunctionChunk,
-    TextChunk,
-    _message_to_generate_content_response,
-    UsageMetadataChunk,
+from volcenginesdkarkruntime.types.responses.response_input_param import (
+    ResponseInputItemParam,
+    ResponseFunctionToolCallParam,
+    EasyInputMessageParam,
+    FunctionCallOutput,
 )
-from google.genai import types
-from litellm import ChatCompletionAssistantMessage
-from litellm.types.utils import (
-    ChatCompletionMessageToolCall,
-    Function,
-)
-from pydantic import Field, BaseModel
-from volcenginesdkarkruntime import AsyncArk
 
 from veadk.config import settings
 from veadk.consts import DEFAULT_VIDEO_MODEL_API_BASE
 from veadk.models.ark_transform_new import (
     request_reorganization_by_ark,
     ark_response_to_generate_content_response,
+    event_to_generate_content_response,
 )
 from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
-_LITELLM_STRUCTURED_TYPES = {"json_object", "json_schema"}
+_ARK_TEXT_FIELD_TYPES = {"json_object", "json_schema"}
 
 
 def _to_responses_api_role(role: Optional[str]) -> Literal["user", "assistant"]:
@@ -280,7 +271,7 @@ def _responses_schema_to_text(
         schema_type = response_schema.get("type")
         if (
             isinstance(schema_type, str)
-            and schema_type.lower() in _LITELLM_STRUCTURED_TYPES
+            and schema_type.lower() in _ARK_TEXT_FIELD_TYPES
         ):
             return response_schema
         schema_dict = dict(response_schema)
@@ -385,7 +376,7 @@ def _get_responses_inputs(
 class ArkLlmClient:
     async def aresponse(
         self, **kwargs
-    ) -> Union[ArkTypeResponse, openai.AsyncStream[ResponseStreamEvent]]:
+    ) -> Union[ArkTypeResponse, AsyncStream[ResponseStreamEvent]]:
         # 1. Get request params
         api_base = kwargs.pop("api_base", DEFAULT_VIDEO_MODEL_API_BASE)
         api_key = kwargs.pop("api_key", settings.model.api_key)
@@ -450,130 +441,13 @@ class ArkLlm(LiteLlm):
         responses_args = request_reorganization_by_ark(responses_args)
 
         if stream:
-            text_format = ""
-            # Track function calls by index
-            function_calls = {}  # index -> {name, args, id}
             responses_args["stream"] = True
-            aggregated_llm_response = None
-            aggregated_llm_response_with_tool_call = None
-            usage_metadata = None
-            fallback_index = 0
-            raw_response = await self.llm_client.aresponse(**responses_args)
-            async for part in raw_response:
-                for (
-                    model_response,
-                    chunk,
-                    finish_reason,
-                ) in self.transform_handler.stream_event_to_chunk(
-                    part, model=self.model
-                ):
-                    if isinstance(chunk, FunctionChunk):
-                        index = chunk.index or fallback_index
-                        if index not in function_calls:
-                            function_calls[index] = {"name": "", "args": "", "id": None}
-
-                        if chunk.name:
-                            function_calls[index]["name"] += chunk.name
-                        if chunk.args:
-                            function_calls[index]["args"] += chunk.args
-
-                            # check if args is completed (workaround for improper chunk
-                            # indexing)
-                            try:
-                                json.loads(function_calls[index]["args"])
-                                fallback_index += 1
-                            except json.JSONDecodeError:
-                                pass
-
-                        function_calls[index]["id"] = (
-                            chunk.id or function_calls[index]["id"] or str(index)
-                        )
-                    elif isinstance(chunk, TextChunk):
-                        text_format += chunk.text
-                        yield _message_to_generate_content_response(
-                            ChatCompletionAssistantMessage(
-                                role="assistant",
-                                content=chunk.text,
-                            ),
-                            is_partial=True,
-                        )
-                    elif isinstance(chunk, UsageMetadataChunk):
-                        usage_metadata = types.GenerateContentResponseUsageMetadata(
-                            prompt_token_count=chunk.prompt_tokens,
-                            candidates_token_count=chunk.completion_tokens,
-                            total_token_count=chunk.total_tokens,
-                        )
-                        # ------------------------------------------------------ #
-                        if model_response.get("usage", {}).get("prompt_tokens_details"):
-                            usage_metadata.cached_content_token_count = (
-                                model_response.get("usage", {})
-                                .get("prompt_tokens_details")
-                                .cached_tokens
-                            )
-                        # ------------------------------------------------------ #
-
-                    if (
-                        finish_reason == "tool_calls" or finish_reason == "stop"
-                    ) and function_calls:
-                        tool_calls = []
-                        for index, func_data in function_calls.items():
-                            if func_data["id"]:
-                                tool_calls.append(
-                                    ChatCompletionMessageToolCall(
-                                        type="function",
-                                        id=func_data["id"],
-                                        function=Function(
-                                            name=func_data["name"],
-                                            arguments=func_data["args"],
-                                            index=index,
-                                        ),
-                                    )
-                                )
-                        aggregated_llm_response_with_tool_call = (
-                            _message_to_generate_content_response(
-                                ChatCompletionAssistantMessage(
-                                    role="assistant",
-                                    content=text_format,
-                                    tool_calls=tool_calls,
-                                )
-                            )
-                        )
-                        self.transform_handler.adapt_responses_api(
-                            model_response,
-                            aggregated_llm_response_with_tool_call,
-                            stream=True,
-                        )
-                        text_format = ""
-                        function_calls.clear()
-                    elif finish_reason == "stop" and text_format:
-                        aggregated_llm_response = _message_to_generate_content_response(
-                            ChatCompletionAssistantMessage(
-                                role="assistant", content=text_format
-                            )
-                        )
-                        self.transform_handler.adapt_responses_api(
-                            model_response,
-                            aggregated_llm_response,
-                            stream=True,
-                        )
-                        text_format = ""
-
-            # waiting until streaming ends to yield the llm_response as litellm tends
-            # to send chunk that contains usage_metadata after the chunk with
-            # finish_reason set to tool_calls or stop.
-            if aggregated_llm_response:
-                if usage_metadata:
-                    aggregated_llm_response.usage_metadata = usage_metadata
-                    usage_metadata = None
-                yield aggregated_llm_response
-
-            if aggregated_llm_response_with_tool_call:
-                if usage_metadata:
-                    aggregated_llm_response_with_tool_call.usage_metadata = (
-                        usage_metadata
-                    )
-                yield aggregated_llm_response_with_tool_call
-
+            async for part in await self.llm_client.aresponse(**responses_args):
+                llm_response = event_to_generate_content_response(
+                    event=part, is_partial=True, model_version=self.model
+                )
+                if llm_response:
+                    yield llm_response
         else:
             raw_response = await self.llm_client.aresponse(**responses_args)
             llm_response = ark_response_to_generate_content_response(raw_response)

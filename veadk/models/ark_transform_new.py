@@ -1,5 +1,5 @@
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 
 from google.adk.models import LlmResponse
 from google.adk.models.cache_metadata import CacheMetadata
@@ -7,11 +7,14 @@ from google.genai import types
 from volcenginesdkarkruntime.types.responses import (
     EasyInputMessageParam,
     ResponseInputTextParam,
-    ResponseOutputItem,
     ResponseReasoningItem,
     ResponseOutputMessage,
     ResponseFunctionToolCall,
     ResponseOutputText,
+    ResponseTextDeltaEvent,
+    ResponseStreamEvent,
+    ResponseCompletedEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
 )
 from volcenginesdkarkruntime.types.responses import Response as ArkTypeResponse
 from volcenginesdkarkruntime.types.responses.response_input_param import (
@@ -214,38 +217,48 @@ def request_reorganization_by_ark(request_data: Dict) -> Dict:
 
 # ---------------------------------------
 # output transfer -----------------------
-
-
-def _output_to_generate_content_response(
-    outputs: List[ResponseOutputItem],
+def event_to_generate_content_response(
+    event: Union[ArkTypeResponse, ResponseStreamEvent],
     *,
     is_partial: bool = False,
     model_version: str = None,
-):
+) -> Optional[LlmResponse]:
     parts = []
-    for output in outputs:
-        if isinstance(output, ResponseReasoningItem):
-            parts.append(
-                types.Part(
-                    text="\n".join([summary.text for summary in output.summary]),
-                    thought=True,
+    if not is_partial:
+        for output in event.output:
+            if isinstance(output, ResponseReasoningItem):
+                parts.append(
+                    types.Part(
+                        text="\n".join([summary.text for summary in output.summary]),
+                        thought=True,
+                    )
                 )
-            )
-        elif isinstance(output, ResponseOutputMessage):
-            text = ""
-            if isinstance(output.content, list):
-                for item in output.content:
-                    if isinstance(item, ResponseOutputText):
-                        text += item.text
-            parts.append(types.Part(text=text))
+            elif isinstance(output, ResponseOutputMessage):
+                text = ""
+                if isinstance(output.content, list):
+                    for item in output.content:
+                        if isinstance(item, ResponseOutputText):
+                            text += item.text
+                parts.append(types.Part(text=text))
 
-        elif isinstance(output, ResponseFunctionToolCall):
-            part = types.Part.from_function_call(
-                name=output.name, args=json.loads(output.arguments or "{}")
-            )
-            part.function_call.id = output.call_id
-            parts.append(part)
+            elif isinstance(output, ResponseFunctionToolCall):
+                part = types.Part.from_function_call(
+                    name=output.name, args=json.loads(output.arguments or "{}")
+                )
+                part.function_call.id = output.call_id
+                parts.append(part)
 
+    else:
+        if isinstance(event, ResponseReasoningSummaryTextDeltaEvent):
+            parts.append(types.Part.from_text(text=event.delta))
+        elif isinstance(event, ResponseTextDeltaEvent):
+            parts.append(types.Part.from_text(text=event.delta))
+        elif isinstance(event, ResponseCompletedEvent):
+            raw_response = event.response
+            llm_response = ark_response_to_generate_content_response(raw_response)
+            return llm_response
+        else:
+            return None
     return LlmResponse(
         content=types.Content(role="model", parts=parts),
         partial=is_partial,
@@ -273,8 +286,8 @@ def ark_response_to_generate_content_response(
     if not outputs:
         raise ValueError("No message in response")
 
-    llm_response = _output_to_generate_content_response(
-        outputs, model_version=raw_response.model
+    llm_response = event_to_generate_content_response(
+        raw_response, model_version=raw_response.model, is_partial=False
     )
     llm_response.finish_reason = finish_reason
     if raw_response.usage:
