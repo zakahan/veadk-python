@@ -170,7 +170,7 @@ class Agent(LlmAgent):
 
         if not self.model:
             if self.enable_responses:
-                from veadk.models.ark_llm_new import ArkLlm
+                from veadk.models.ark_llm import ArkLlm
 
                 self.model = ArkLlm(
                     model=f"{self.model_provider}/{self.model_name}",
