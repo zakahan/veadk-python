@@ -161,6 +161,9 @@ class Agent(LlmAgent):
     enable_skills_checklist: bool = False
     _skills_with_checklist: Dict[str, Any] = {}
 
+    a2a_space_id: Optional[str] = None
+    a2a_space_config: Optional[dict] = None
+
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(None)  # for sub_agents init
 
@@ -353,6 +356,14 @@ class Agent(LlmAgent):
                     ]
             else:
                 self.after_agent_callback = dataset_auto_gen_callback
+
+        if self.a2a_space_id:
+            from veadk.utils.a2a_utils import list_remote_a2a_agents
+
+            agentkit_a2a_agents = list_remote_a2a_agents(
+                a2a_space_id=self.a2a_space_id, a2a_space_config=self.a2a_space_config
+            )
+            self.sub_agents.extend(agentkit_a2a_agents)
 
         logger.info(f"VeADK version: {VERSION}")
 
