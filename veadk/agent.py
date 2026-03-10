@@ -163,6 +163,7 @@ class Agent(LlmAgent):
 
     a2a_space_id: Optional[str] = None
     a2a_space_config: Optional[dict] = None
+    a2a_mode: Literal["auto", "tool"] = "auto"
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(None)  # for sub_agents init
@@ -358,12 +359,22 @@ class Agent(LlmAgent):
                 self.after_agent_callback = dataset_auto_gen_callback
 
         if self.a2a_space_id:
-            from veadk.utils.a2a_utils import list_remote_a2a_agents
+            if self.a2a_mode == "auto":
+                from veadk.utils.a2a_utils import list_remote_a2a_agents
 
-            agentkit_a2a_agents = list_remote_a2a_agents(
-                a2a_space_id=self.a2a_space_id, a2a_space_config=self.a2a_space_config
-            )
-            self.sub_agents.extend(agentkit_a2a_agents)
+                agentkit_a2a_agents = list_remote_a2a_agents(
+                    a2a_space_id=self.a2a_space_id,
+                    a2a_space_config=self.a2a_space_config,
+                    output_mode="agent",
+                )
+                self.sub_agents.extend(agentkit_a2a_agents)
+            elif self.a2a_mode == "tool":
+                from veadk.tools.builtin_tools.a2a_hub import (
+                    add_sub_agents,
+                    list_sub_agents,
+                )
+
+                self.tools.extend([list_sub_agents, add_sub_agents])
 
         logger.info(f"VeADK version: {VERSION}")
 

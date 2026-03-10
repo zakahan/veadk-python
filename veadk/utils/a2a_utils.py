@@ -1,7 +1,8 @@
 import json
 import os
-from typing import Optional
+from typing import Optional, Literal
 
+from veadk.a2a.remote_ve_agent import RemoteVeAgent
 from veadk.config import getenv
 from veadk.utils.volcengine_sign import ve_request
 from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
@@ -135,7 +136,11 @@ def get_a2a_agent(
     return agent
 
 
-def list_remote_a2a_agents(a2a_space_id: str, a2a_space_config: Optional[dict] = None):
+def list_remote_a2a_agents(
+    a2a_space_id: str,
+    a2a_space_config: Optional[dict] = None,
+    output_mode: Literal["agent", "tool"] = "agent",
+):
     a2a_space_config = a2a_space_config or {}
 
     agent_list = list_a2a_agents(
@@ -156,13 +161,39 @@ def list_remote_a2a_agents(a2a_space_id: str, a2a_space_config: Optional[dict] =
 
         agent_card = json.loads(agent.get("AgentCard"))
 
-        agentkit_a2a_agents.append(
-            # RemoteVeAgent(
-            #     name=agent_info.get("Name", ""),
-            #     url=agent_info.get("Host", ""),
-            #     # auth_method="",
-            #     # auth_token=""
-            # )
-            agent_card
-        )
+        if output_mode == "agent":
+            item = RemoteVeAgent(
+                name=agent_info.get("Name", ""),
+                url=agent_info.get("Host", ""),
+                auth_method=None,  # "",
+                auth_token="",
+            )
+
+        else:
+            item = {
+                "id": a2a_agent_id,
+                "name": agent_card.get("name"),
+                "description": agent_card.get("description"),
+            }
+        agentkit_a2a_agents.append(item)
     return agentkit_a2a_agents
+
+
+def create_remote_ve_agent(agent_info: dict) -> RemoteVeAgent:
+    """
+    Create a RemoteVeAgent instance based on agent info.
+
+    Args:
+        agent_info: Agent info dict from get_a2a_agent
+
+    Returns:
+        RemoteVeAgent: Created remote agent instance
+    """
+    # agent_card = json.loads(agent_info.get("AgentCard", "{}"))
+
+    return RemoteVeAgent(
+        name=agent_info.get("Name", ""),
+        url=agent_info.get("Host", ""),
+        auth_method=None,  # "querystring",
+        # auth_token="",
+    )
