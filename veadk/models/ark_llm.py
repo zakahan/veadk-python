@@ -101,6 +101,7 @@ ark_supported_fields = [
     "tools",
     "top_p",
     "max_tool_calls",
+    "context_management",
     "expire_at",
     "extra_headers",
     "extra_query",
