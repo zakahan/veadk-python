@@ -21,6 +21,7 @@ and a bilingual README (English + 中文).
 | 09 | [Long-term memory](./09_long_term_memory/) | Complex | Recall facts across sessions (`auto_save_session`) |
 | 10 | [Agent routing](./10_agent_routing/) | Complex | A coordinator that delegates to specialists dynamically |
 | 11 | [Tracing](./11_tracing/) | Complex | Observe LLM/tool calls; dump or export spans |
+| 13 | [Long-running CodeEnv task](./13_long_running_code_task/) | Complex | Start a background CodeEnv task, stream progress, and resume the Agent |
 
 There are also frontend-focused demos that run with
 `veadk frontend --agents-dir examples`:
@@ -33,7 +34,8 @@ For a deployable **full app** (web UI + agent API in one container, shipped to
 Volcengine AgentKit via `veadk agentkit`), see [`basic-app/`](./basic-app/).
 
 The examples are grouped by concept: 01–02 basics, 03 & 09 memory, 04–05 tools &
-knowledge, 06 & 10 multi-agent, 07–08 model behavior, 11 observability.
+knowledge, 06 & 10 multi-agent, 07–08 model behavior, 11 observability, and 13
+long-running task orchestration.
 
 ## Common setup
 

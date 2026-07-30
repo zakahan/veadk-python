@@ -43,6 +43,7 @@ _EXPECTED_NAMES = {
     "link_reader",
     "run_code",
     "coding",
+    "execute_code_task",
     "image_generate",
     "image_edit",
     "video_generate",

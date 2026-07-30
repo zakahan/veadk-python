@@ -14,7 +14,7 @@
 
 import json
 import os
-from typing import Any, Optional
+from typing import Any, Protocol
 
 from veadk.auth.veauth.utils import get_credential_from_vefaas_iam
 from veadk.config import getenv
@@ -22,6 +22,10 @@ from veadk.utils.logger import get_logger
 from veadk.utils.volcengine_sign import ve_request
 
 logger = get_logger(__name__)
+
+
+class _ToolState(Protocol):
+    def get(self, key: str, default: Any = None) -> Any: ...
 
 
 def resolve_agentkit_tool_id(*preferred_env_names: str) -> str:
@@ -58,11 +62,21 @@ def get_agentkit_endpoint_config(
 
 
 def get_agentkit_credentials(
-    tool_state: Optional[dict[str, Any]] = None,
+    tool_state: _ToolState | None = None,
 ) -> tuple[str, str, dict[str, str]]:
     """Resolve AgentKit invocation credentials from tool state, env, or IAM."""
     ak = tool_state.get("VOLCENGINE_ACCESS_KEY") if tool_state else None
     sk = tool_state.get("VOLCENGINE_SECRET_KEY") if tool_state else None
+    session_token = None
+    if tool_state:
+        session_token = tool_state.get("VOLCENGINE_SESSION_TOKEN") or tool_state.get(
+            "VOLC_SESSIONTOKEN"
+        )
+    session_token = (
+        session_token
+        or os.getenv("VOLCENGINE_SESSION_TOKEN")
+        or os.getenv("VOLC_SESSIONTOKEN")
+    )
     header: dict[str, str] = {}
 
     if not (ak and sk):
@@ -81,11 +95,13 @@ def get_agentkit_credentials(
             logger.debug("Successfully get AK/SK from environment variables.")
     else:
         logger.debug("Successfully get AK/SK from tool context.")
+    if session_token:
+        header = {"X-Security-Token": session_token}
 
     return ak, sk, header
 
 
-def get_agentkit_account_id(tool_state: Optional[dict[str, Any]] = None) -> str:
+def get_agentkit_account_id(tool_state: _ToolState | None = None) -> str:
     """Get the current caller account id for remote skills sandbox setup."""
     cloud_provider = (os.getenv("CLOUD_PROVIDER") or "").lower()
     if cloud_provider == "vestack":
@@ -119,8 +135,8 @@ def invoke_agentkit_run_code(
     code: str,
     timeout: int,
     kernel_name: str,
-    tool_state: Optional[dict[str, Any]] = None,
-    ttl: Optional[int] = None,
+    tool_state: _ToolState | None = None,
+    ttl: int | None = None,
 ) -> dict[str, Any]:
     """Invoke the AgentKit RunCode operation."""
     service, region, host, scheme = get_agentkit_endpoint_config()
@@ -160,13 +176,13 @@ def invoke_agentkit_exec_bash(
     tool_id: str,
     tool_user_session_id: str,
     command: str,
-    exec_dir: Optional[str] = None,
-    env: Optional[dict[str, str]] = None,
+    exec_dir: str | None = None,
+    env: dict[str, str] | None = None,
     timeout: int = 30,
-    hard_timeout: Optional[int] = None,
-    max_output_length: Optional[int] = None,
-    tool_state: Optional[dict[str, Any]] = None,
-    ttl: Optional[int] = None,
+    hard_timeout: int | None = None,
+    max_output_length: int | None = None,
+    tool_state: _ToolState | None = None,
+    ttl: int | None = None,
 ) -> dict[str, Any]:
     """Invoke AgentKit's Bash execution operation through InvokeTool."""
     service, region, host, scheme = get_agentkit_endpoint_config()

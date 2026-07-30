@@ -52,6 +52,7 @@ Built-in tools depend on Volcengine services. Enable the corresponding service a
 | `text_to_speech` | Text-to-speech (TTS) | `from veadk.tools.builtin_tools.tts import text_to_speech` |
 | `run_code` | Execute code in an AgentKit sandbox | `from veadk.tools.builtin_tools.run_code import run_code` |
 | `execute_skills` | Run an `agent.py` workflow in a prebuilt skills sandbox | `from veadk.tools.builtin_tools.execute_skills import execute_skills` |
+| `execute_code_task` | Delegate a long-running coding task to Codex in AgentKit CodeEnv | `from veadk.tools.builtin_tools.execute_code_task import execute_code_task` |
 | `coding` | Run a code-generation workflow in a prebuilt OpenCode sandbox | `from veadk.tools.builtin_tools.coding import coding` |
 | `run_sandbox_agent` | Run `agent.py` in a remote AgentKit sandbox under any `tool_id` | `from veadk.tools.builtin_tools.run_sandbox_agent import run_sandbox_agent` |
 | `create_mobile_use_tool` | Operate a cloud phone | `from veadk.tools.builtin_tools.mobile_run import create_mobile_use_tool` |
@@ -477,6 +478,7 @@ VeADK provides a set of tools that run tasks remotely in an [AgentKit sandbox](h
 | :--- | :--- |
 | `run_code` | Execute arbitrary code — good for computation, data processing |
 | `execute_skills` | Run an `agent.py` workflow in a prebuilt skills sandbox |
+| `execute_code_task` | Run a long-lived Codex coding task asynchronously in CodeEnv |
 | `coding` | Run a code-generation workflow in an OpenCode sandbox |
 | `run_sandbox_agent` | Run `agent.py` in a remote sandbox under any `tool_id` |
 
@@ -522,6 +524,7 @@ Environment variables:
 
 - `MODEL_AGENT_API_KEY`: API key for the agent's reasoning model
 - `VOLCENGINE_ACCESS_KEY` / `VOLCENGINE_SECRET_KEY`: Volcengine AK / SK
+- `VOLCENGINE_SESSION_TOKEN`: optional Session Token for temporary credentials
 - `AGENTKIT_TOOL_ID`: default AgentKit sandbox ID, the fallback for all sandbox tools
 - `AGENTKIT_TOOL_ID_SCRIPT`: sandbox ID dedicated to `run_code`; falls back to `AGENTKIT_TOOL_ID`
 - `AGENTKIT_TOOL_ID_SKILLS`: sandbox ID dedicated to `execute_skills`; falls back to `AGENTKIT_TOOL_ID`
@@ -538,6 +541,117 @@ agentkit:
   tool_id_skills: your-skills-tool-id
   tool_id_opencode: your-opencode-tool-id
 ```
+
+### Long-running Codex tasks (execute_code_task)
+
+`execute_code_task` is a native ADK `LongRunningFunctionTool`. The Agent sees
+one task-creation tool; authentication and `AGENTKIT_TOOL_ID` come from
+ToolContext / the environment and never appear as model-supplied arguments.
+The model can provide only the instruction, sandbox working directory, an
+optional Codex model, and a timeout.
+`poll_code_task` and `resume_code_task` are host-application Python APIs; do
+not register them as Agent tools.
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `instruction` | `str` | Required | Complete Codex objective and acceptance criteria |
+| `cwd` | `str` | `/home/gem` | Absolute working directory inside CodeEnv |
+| `model` | `str \| None` | `None` | Optional Codex model override; otherwise uses the Tool configuration |
+| `timeout_seconds` | `int` | `3600` | Codex turn timeout, from 1 to 86400 seconds |
+
+The execution lifecycle is:
+
+1. The Agent calls `execute_code_task`; it creates an in-process task and
+   immediately returns `pending + task_id`.
+2. A worker thread obtains a CodeEnv Endpoint through AgentKit `CreateSession`,
+   then connects to `/v1/codex/app-server/`.
+3. Codex text deltas, commands, file changes, and other progress enter the task
+   event stream. The application incrementally reads them with
+   `poll_code_task(task_id, cursor=...)`.
+4. Once terminal, the application calls `resume_code_task(runner, task_id)`.
+   The helper injects a final `FunctionResponse` under the original
+   function-call ID and VEADK session, allowing the Agent to summarize it.
+
+```python title="agent.py"
+import asyncio
+
+from google.genai import types
+from veadk import Agent, Runner
+from veadk.memory.short_term_memory import ShortTermMemory
+from veadk.tools.builtin_tools.execute_code_task import (
+    execute_code_task,
+    poll_code_task,
+    resume_code_task,
+)
+
+APP_NAME = "code_task_app"
+USER_ID = "demo-user"
+SESSION_ID = "demo-session"
+
+
+async def main():
+    agent = Agent(
+        instruction=(
+            "Delegate repository coding work to execute_code_task; "
+            "call it only once for a given task."
+        ),
+        tools=[execute_code_task],
+    )
+    memory = ShortTermMemory()
+    runner = Runner(agent=agent, app_name=APP_NAME, short_term_memory=memory)
+    await memory.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+    )
+
+    task_id = None
+    async for event in runner.run_async(
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+        new_message=types.Content(
+            role="user",
+            parts=[types.Part(text="Fix the failing tests and rerun them")],
+        ),
+    ):
+        for response in event.get_function_responses():
+            if response.name == "execute_code_task":
+                task_id = response.response.get("task_id")
+
+    if not task_id:
+        raise RuntimeError("the Agent did not create a CodeEnv task")
+
+    cursor = 0
+    while True:
+        snapshot = await asyncio.to_thread(
+            poll_code_task, task_id, cursor, 10, 100
+        )
+        for task_event in snapshot["events"]:
+            cursor = task_event["sequence"]
+            print(task_event)
+        if snapshot["is_terminal"]:
+            break
+
+    async for event in resume_code_task(runner, task_id):
+        if event.content:
+            print("".join(part.text or "" for part in event.content.parts or []))
+
+
+asyncio.run(main())
+```
+
+See `examples/13_long_running_code_task/main.py` for complete task-ID capture,
+incremental progress output, and Agent resumption.
+
+<Callout type="warn" title="First-version boundaries">
+Tasks, events, and in-flight temporary credentials live in the current VEADK
+process; credentials are cleared at terminal state. The worker is independent
+of the first Agent invocation's event loop, so it continues after that
+invocation returns or the client disconnects; a service process restart still
+loses the task. `resume_code_task` must receive a Runner that shares the
+original session service. Multi-process deployments require sticky routing.
+This native pause/resume contract currently targets `runtime="adk"`.
+</Callout>
 
 ### Create a sandbox
 

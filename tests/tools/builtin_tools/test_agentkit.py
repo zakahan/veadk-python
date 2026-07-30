@@ -203,5 +203,37 @@ class TestInvokeAgentkitExecBash(unittest.TestCase):
         )
 
 
+class TestAgentkitCredentials(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.agentkit_module = _load_agentkit_module()
+
+    def test_context_temporary_credentials_preserve_session_token(self):
+        ak, sk, header = self.agentkit_module.get_agentkit_credentials(
+            {
+                "VOLCENGINE_ACCESS_KEY": "context-ak",
+                "VOLCENGINE_SECRET_KEY": "context-sk",
+                "VOLCENGINE_SESSION_TOKEN": "context-token",
+            }
+        )
+
+        self.assertEqual((ak, sk), ("context-ak", "context-sk"))
+        self.assertEqual(header, {"X-Security-Token": "context-token"})
+
+    def test_context_temporary_credentials_accept_legacy_session_token_name(self):
+        _, _, header = self.agentkit_module.get_agentkit_credentials(
+            {
+                "VOLCENGINE_ACCESS_KEY": "context-ak",
+                "VOLCENGINE_SECRET_KEY": "context-sk",
+                "VOLC_SESSIONTOKEN": "legacy-context-token",
+            }
+        )
+
+        self.assertEqual(
+            header,
+            {"X-Security-Token": "legacy-context-token"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

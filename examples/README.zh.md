@@ -20,6 +20,7 @@
 | 09 | [长期记忆](./09_long_term_memory/) | 复杂 | 跨会话回忆事实（`auto_save_session`） |
 | 10 | [智能体路由](./10_agent_routing/) | 复杂 | 协调者动态委派给专家智能体 |
 | 11 | [链路追踪](./11_tracing/) | 复杂 | 观测大模型/工具调用；导出 span |
+| 13 | [CodeEnv 长任务](./13_long_running_code_task/) | 复杂 | 启动后台 CodeEnv 任务、展示进度并恢复 Agent |
 
 另外还有可通过 `veadk frontend --agents-dir examples` 运行的 frontend 示例：
 
@@ -31,7 +32,7 @@
 `veadk agentkit` 部署到火山引擎 AgentKit），参见 [`basic-app/`](./basic-app/)。
 
 这些示例按概念分组：01–02 基础，03 与 09 记忆，04–05 工具与知识，
-06 与 10 多智能体，07–08 模型行为，11 可观测性。
+06 与 10 多智能体，07–08 模型行为，11 可观测性，13 长任务编排。
 
 ## 通用准备
 

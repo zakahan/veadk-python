@@ -16,6 +16,7 @@ Prefix `VOLCENGINE_`, for accessing Volcengine cloud services.
 | :- | :- |
 | `VOLCENGINE_ACCESS_KEY` | Volcengine Access Key |
 | `VOLCENGINE_SECRET_KEY` | Volcengine Secret Key |
+| `VOLCENGINE_SESSION_TOKEN` | Session Token when using temporary credentials |
 
 ```yaml title="config.yaml"
 volcengine:
@@ -43,7 +44,8 @@ Prefix `MODEL_`, split into inference, embedding, and judge models.
 
 ## Built-in tools
 
-Prefix `TOOL_`, configured only when the corresponding tool is used.
+Most tools use the `TOOL_` prefix; AgentKit sandbox tools use `AGENTKIT_`.
+Configure only the tools you use.
 
 | Group | Variable | Meaning |
 | :- | :- | :- |
@@ -61,6 +63,9 @@ Prefix `TOOL_`, configured only when the corresponding tool is used.
 | | `TOOL_LAS_DATASET_ID` | LAS dataset ID |
 | VOD | `TOOL_VOD_GROUPS` | Video editing capability groups |
 | | `TOOL_VOD_TIMEOUT` | Connection timeout |
+| AgentKit | `AGENTKIT_TOOL_ID` | Default sandbox Tool ID |
+| | `AGENTKIT_TOOL_REGION` | AgentKit region; defaults to `cn-beijing` |
+| | `VEADK_CODE_TASK_APPROVAL_POLICY` | CodeEnv task approval policy: `accept` (default) or `decline` |
 
 ## Harness Extension
 

@@ -33,6 +33,7 @@ _BUILTIN_TOOLS: dict[str, str] = {
     # Code
     "run_code": "veadk.tools.builtin_tools.run_code:run_code",
     "coding": "veadk.tools.builtin_tools.coding:coding",
+    "execute_code_task": "veadk.tools.builtin_tools.execute_code_task:execute_code_task",
     # Image / video / speech generation
     "image_generate": "veadk.tools.builtin_tools.image_generate:image_generate",
     "image_edit": "veadk.tools.builtin_tools.image_edit:image_edit",
@@ -66,8 +67,8 @@ def get_builtin_tool(name: str) -> ToolUnion:
 
 
 __all__ = [
+    "get_builtin_tool",
     "get_city_weather",
     "get_location_weather",
-    "get_builtin_tool",
     "list_builtin_tools",
 ]

@@ -52,6 +52,7 @@ agent = Agent(tools=[web_search])
 | `text_to_speech` | 语音合成（TTS） | `from veadk.tools.builtin_tools.tts import text_to_speech` |
 | `run_code` | 在 AgentKit 沙箱中执行代码 | `from veadk.tools.builtin_tools.run_code import run_code` |
 | `execute_skills` | 在预制技能沙箱中远程执行 `agent.py` 工作流 | `from veadk.tools.builtin_tools.execute_skills import execute_skills` |
+| `execute_code_task` | 把长时编码任务委派给 AgentKit CodeEnv 中的 Codex | `from veadk.tools.builtin_tools.execute_code_task import execute_code_task` |
 | `coding` | 在预制 OpenCode 沙箱中执行代码生成工作流 | `from veadk.tools.builtin_tools.coding import coding` |
 | `run_sandbox_agent` | 指定任意 `tool_id` 在远端 AgentKit 沙箱执行 `agent.py` | `from veadk.tools.builtin_tools.run_sandbox_agent import run_sandbox_agent` |
 | `create_mobile_use_tool` | 在云手机上执行手机操作任务 | `from veadk.tools.builtin_tools.mobile_run import create_mobile_use_tool` |
@@ -474,6 +475,7 @@ VeADK 提供一组在 [AgentKit 沙箱](https://console.volcengine.com/agentkit)
 | :--- | :--- |
 | `run_code` | 执行任意代码，适合计算、数据处理等 |
 | `execute_skills` | 在预制技能沙箱中运行 `agent.py` 工作流 |
+| `execute_code_task` | 让 Codex 在 CodeEnv 中异步执行长时编码任务 |
 | `coding` | 在 OpenCode 沙箱中运行代码生成工作流 |
 | `run_sandbox_agent` | 指定任意 `tool_id` 在远端沙箱执行 `agent.py` |
 
@@ -518,6 +520,7 @@ if __name__ == "__main__":
 
 - `MODEL_AGENT_API_KEY`：Agent 推理模型的 API Key
 - `VOLCENGINE_ACCESS_KEY` / `VOLCENGINE_SECRET_KEY`：火山引擎 AK / SK
+- `VOLCENGINE_SESSION_TOKEN`：使用临时凭证时的可选 Session Token
 - `AGENTKIT_TOOL_ID`：默认 AgentKit 沙箱 ID，作为所有沙箱工具的兜底配置
 - `AGENTKIT_TOOL_ID_SCRIPT`：`run_code` 专用沙箱 ID，未配置时回退到 `AGENTKIT_TOOL_ID`
 - `AGENTKIT_TOOL_ID_SKILLS`：`execute_skills` 专用沙箱 ID，未配置时回退到 `AGENTKIT_TOOL_ID`
@@ -534,6 +537,105 @@ agentkit:
   tool_id_skills: your-skills-tool-id
   tool_id_opencode: your-opencode-tool-id
 ```
+
+### Codex 长任务（execute_code_task）
+
+`execute_code_task` 是一个原生 ADK `LongRunningFunctionTool`。对 Agent 来说只有一个
+创建任务的工具；鉴权信息与 `AGENTKIT_TOOL_ID` 从 ToolContext / 环境读取，不会暴露为
+模型可填写的参数。模型能填写的字段只有任务指令、沙箱工作目录、可选 Codex 模型和超时时间。
+`poll_code_task` 与 `resume_code_task` 是应用宿主调用的 Python API，不需要注册给 Agent。
+
+| 参数 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `instruction` | `str` | 必填 | 交给 Codex 的完整任务目标和验收要求 |
+| `cwd` | `str` | `/home/gem` | CodeEnv 内的绝对工作目录 |
+| `model` | `str \| None` | `None` | Codex 模型覆盖值；默认使用 Tool 配置 |
+| `timeout_seconds` | `int` | `3600` | Codex turn 超时，范围为 1～86400 秒 |
+
+底层执行顺序如下：
+
+1. Agent 调用 `execute_code_task`，工具创建进程内任务并立即返回 `pending + task_id`；
+2. 后台线程通过 AgentKit `CreateSession` 获取 CodeEnv Endpoint，再连接
+   `/v1/codex/app-server/`；
+3. Codex 的文本增量、命令、文件修改等事件进入任务事件流，应用通过
+   `poll_code_task(task_id, cursor=...)` 增量读取；
+4. 任务结束后，应用调用 `resume_code_task(runner, task_id)`。该函数使用原始
+   function-call ID 和同一 VEADK 会话注入最终 `FunctionResponse`，Agent 再生成总结。
+
+```python title="agent.py"
+import asyncio
+
+from google.genai import types
+from veadk import Agent, Runner
+from veadk.memory.short_term_memory import ShortTermMemory
+from veadk.tools.builtin_tools.execute_code_task import (
+    execute_code_task,
+    poll_code_task,
+    resume_code_task,
+)
+
+APP_NAME = "code_task_app"
+USER_ID = "demo-user"
+SESSION_ID = "demo-session"
+
+
+async def main():
+    agent = Agent(
+        instruction="把仓库级编码工作委派给 execute_code_task；同一任务只调用一次。",
+        tools=[execute_code_task],
+    )
+    memory = ShortTermMemory()
+    runner = Runner(agent=agent, app_name=APP_NAME, short_term_memory=memory)
+    await memory.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+    )
+
+    task_id = None
+    async for event in runner.run_async(
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+        new_message=types.Content(
+            role="user",
+            parts=[types.Part(text="检查仓库，修复测试失败并重新运行测试")],
+        ),
+    ):
+        for response in event.get_function_responses():
+            if response.name == "execute_code_task":
+                task_id = response.response.get("task_id")
+
+    if not task_id:
+        raise RuntimeError("Agent 未创建 CodeEnv 任务")
+
+    cursor = 0
+    while True:
+        snapshot = await asyncio.to_thread(
+            poll_code_task, task_id, cursor, 10, 100
+        )
+        for task_event in snapshot["events"]:
+            cursor = task_event["sequence"]
+            print(task_event)
+        if snapshot["is_terminal"]:
+            break
+
+    async for event in resume_code_task(runner, task_id):
+        if event.content:
+            print("".join(part.text or "" for part in event.content.parts or []))
+
+
+asyncio.run(main())
+```
+
+完整的捕获 `task_id`、持续展示事件和恢复 Agent 的代码见
+`examples/13_long_running_code_task/main.py`。
+
+<Callout type="warn" title="第一版边界">
+任务、事件和运行期间的临时鉴权信息保存在当前 VEADK 进程内，任务终态后会清空凭证。
+任务不依赖首次 Agent 调用的 event loop，调用结束或客户端断开后仍可继续，但服务进程
+重启会丢失任务。调用 `resume_code_task` 的 Runner 必须共享首次调用所用的 session
+service。多进程部署需要粘性路由。该原生暂停/恢复语义目前用于 `runtime="adk"`。
+</Callout>
 
 ### 创建沙箱
 
