@@ -1851,7 +1851,7 @@ export default function App() {
     }
   }
 
-  async function launchSandboxSession() {
+  async function launchSandboxSession(displayName: string) {
     sandboxLaunchAbortRef.current?.abort();
     const controller = new AbortController();
     sandboxLaunchAbortRef.current = controller;
@@ -1859,6 +1859,7 @@ export default function App() {
     setSandboxLaunchError("");
     try {
       const nextSession = await sandboxClient.startSession({
+        displayName,
         signal: controller.signal,
       });
       if (sandboxLaunchAbortRef.current !== controller) return;
@@ -1868,7 +1869,11 @@ export default function App() {
       setSandboxLaunchOpen(false);
       setSandboxLaunchState("confirm");
       showToast(
-        `已创建 ${nextSession.userSessionId || `Codex 智能体 ${nextSession.id.slice(0, 8)}`}`,
+        `已创建 ${
+          nextSession.displayName ||
+          nextSession.userSessionId ||
+          `Codex 智能体 ${nextSession.id.slice(0, 8)}`
+        }`,
       );
     } catch (launchError) {
       if ((launchError as Error)?.name === "AbortError") return;
@@ -3797,7 +3802,7 @@ export default function App() {
         state={sandboxLaunchState}
         error={sandboxLaunchError}
         onCancel={cancelSandboxLaunch}
-        onConfirm={() => void launchSandboxSession()}
+        onConfirm={(displayName) => void launchSandboxSession(displayName)}
       />
 
       {toast && (
