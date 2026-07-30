@@ -78,7 +78,11 @@ import {
   AgentWorkspace,
   type WorkspaceAgentDraft,
 } from "./ui/AgentWorkspace";
-import { MyAgents, type MyAgentCardData } from "./ui/MyAgents";
+import {
+  MyAgents,
+  type AgentType,
+  type MyAgentCardData,
+} from "./ui/MyAgents";
 import { SearchView } from "./ui/Search";
 import {
   buildAgentEntries,
@@ -1003,6 +1007,9 @@ export default function App() {
     useState<"good" | "bad">("good");
   const [feedbackTargetEventId, setFeedbackTargetEventId] = useState("");
   const [myAgents, setMyAgents] = useState(false);
+  const [agentDirectoryType, setAgentDirectoryType] =
+    useState<AgentType>("general");
+  const [codexSessionsRefreshKey, setCodexSessionsRefreshKey] = useState(0);
   // A search result may belong to a different agent; remember it so the
   // agent-switch effect opens it instead of resetting to a fresh chat.
   const pendingOpenRef = useRef<{ app: string; sid: string } | null>(null);
@@ -1826,6 +1833,7 @@ export default function App() {
 
   function openSandboxLaunch() {
     if (sandboxSession) return;
+    setAgentDirectoryType("codex");
     setError("");
     setSandboxLaunchError("");
     setSandboxLaunchState("confirm");
@@ -1854,28 +1862,14 @@ export default function App() {
         signal: controller.signal,
       });
       if (sandboxLaunchAbortRef.current !== controller) return;
-      viewSidRef.current = "";
-      setSessionId("");
-      setPendingTurns([]);
-      setInput("");
-      setInvocation(emptyInvocation());
-      setNewChatMode("temporary");
-      discardSkillCreation();
-      setSkillCreating(false);
-      discardDraftAttachments(attachments);
-      setAttachments([]);
-      setSandboxTurns([]);
-      setSandboxSession(nextSession);
-      setCreateView(null);
-      setSkillCenter(false);
-      setAddAgent(false);
-      setAddMenu(false);
-      setSearchView(false);
-      setManageAgents(false);
-      setAgentDetailTarget(null);
-      setMyAgents(false);
+      setAgentDirectoryType("codex");
+      setCodexSessionsRefreshKey((key) => key + 1);
+      setMyAgents(true);
       setSandboxLaunchOpen(false);
       setSandboxLaunchState("confirm");
+      showToast(
+        `已创建 ${nextSession.userSessionId || `Codex 智能体 ${nextSession.id.slice(0, 8)}`}`,
+      );
     } catch (launchError) {
       if ((launchError as Error)?.name === "AbortError") return;
       if (sandboxLaunchAbortRef.current !== controller) return;
@@ -1890,6 +1884,31 @@ export default function App() {
         sandboxLaunchAbortRef.current = null;
       }
     }
+  }
+
+  async function connectSandboxSession(session: SandboxSessionInfo) {
+    const nextSession = await sandboxClient.connectSession(session.id);
+    viewSidRef.current = "";
+    setSessionId("");
+    setPendingTurns([]);
+    setInput("");
+    setInvocation(emptyInvocation());
+    setNewChatMode("temporary");
+    discardSkillCreation();
+    setSkillCreating(false);
+    discardDraftAttachments(attachments);
+    setAttachments([]);
+    setSandboxTurns([]);
+    setSandboxSession(nextSession);
+    setCreateView(null);
+    setSkillCenter(false);
+    setAddAgent(false);
+    setAddMenu(false);
+    setSearchView(false);
+    setManageAgents(false);
+    setAgentDetailTarget(null);
+    setMyAgents(false);
+    setError("");
   }
 
   function exitSandboxSession() {
@@ -1907,6 +1926,22 @@ export default function App() {
         .closeSession(closingSession.id)
         .catch((closeError) => setError(String(closeError)));
     }
+  }
+
+  function returnToCodexAgents() {
+    exitSandboxSession();
+    viewSidRef.current = "";
+    setSessionId("");
+    setCreateView(null);
+    setSkillCenter(false);
+    setAddAgent(false);
+    setAddMenu(false);
+    setSearchView(false);
+    setManageAgents(false);
+    setAgentDetailTarget(null);
+    setAgentDirectoryType("codex");
+    setCodexSessionsRefreshKey((key) => key + 1);
+    setMyAgents(true);
   }
 
   async function sendSandboxMessage(text: string) {
@@ -2978,7 +3013,7 @@ export default function App() {
             className={`composer-slot${sandboxSession ? " sandbox-composer-wrap" : ""}`}
           >
             {sandboxSession && (
-              <SandboxSessionWarning onExit={startNewChat} />
+              <SandboxSessionWarning onExit={returnToCodexAgents} />
             )}
             <Composer
               sessionId={sandboxSession ? sandboxSession.id : sessionId}
@@ -3234,11 +3269,15 @@ export default function App() {
 
             {myAgents ? (
               <MyAgents
+                activeType={agentDirectoryType}
+                onActiveTypeChange={setAgentDirectoryType}
                 onCreateAgent={openAgentCreateFromMyAgents}
                 onCreateCodexAgent={openSandboxLaunch}
+                onOpenCodexSession={connectSandboxSession}
                 onUseAgent={connectMyAgent}
                 onViewAgentDetails={openMyAgentDetails}
                 connectedRuntimeId={connectedRuntimeId}
+                codexRefreshKey={codexSessionsRefreshKey}
               />
             ) : showManageAgents ? (
               <AgentWorkspace
@@ -3488,7 +3527,7 @@ export default function App() {
               />
             ) : turns.length === 0 && skillJob ? (
               <SkillCreateWorkspace initialJob={skillJob} />
-            ) : turns.length === 0 && !newChatCapabilitiesReady ? (
+            ) : turns.length === 0 && !sandboxSession && !newChatCapabilitiesReady ? (
               <div className="session-loading">
                 <Loader2 className="icon spin" /> 正在检查 Agent 能力…
               </div>
@@ -3496,7 +3535,7 @@ export default function App() {
               <div className="welcome">
                 <TextShimmer as="h1" className="welcome-title" duration={4.8} spread={22}>
                   {sandboxSession
-                    ? "让灵感在临时空间里自由生长"
+                    ? "和 Codex 智能体开始工作"
                     : newChatMode === "skill-create"
                       ? "想创建一个什么 Skill？"
                       : greeting}
