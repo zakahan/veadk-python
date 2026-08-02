@@ -31,6 +31,7 @@ from opentelemetry.sdk import metrics as metrics_sdk
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import Span
 from pydantic import BaseModel, Field
 from typing_extensions import override
 
@@ -153,6 +154,10 @@ class Meters:
     APMPLUS_TOOL_TOKEN_USAGE = "apmplus_tool_token_usage"
     # skill invoke latency
     GEN_AI_SKILL_INVOKE_LATENCY = "gen_ai_skill_invoke_latency"
+    GEN_AI_SKILL_INVOCATIONS = "gen_ai.skill.invocations"
+    GEN_AI_SKILL_ERRORS = "gen_ai.skill.errors"
+    GEN_AI_SKILL_OPERATION_DURATION = "gen_ai.skill.operation.duration"
+    GEN_AI_SKILL_TOKEN_USAGE = "gen_ai.skill.token.usage"
 
 
 class MeterUploader:
@@ -277,6 +282,28 @@ class MeterUploader:
             unit="s",
             explicit_bucket_boundaries_advisory=_GEN_AI_CLIENT_OPERATION_DURATION_BUCKETS,
         )
+        self.skill_invoke_counter = self.meter.create_counter(
+            name=Meters.GEN_AI_SKILL_INVOCATIONS,
+            description="Number of skill operations",
+            unit="count",
+        )
+        self.skill_error_counter = self.meter.create_counter(
+            name=Meters.GEN_AI_SKILL_ERRORS,
+            description="Number of failed skill operations",
+            unit="count",
+        )
+        self.skill_duration_histogram = self.meter.create_histogram(
+            name=Meters.GEN_AI_SKILL_OPERATION_DURATION,
+            description="Duration of skill operations",
+            unit="s",
+            explicit_bucket_boundaries_advisory=_GEN_AI_CLIENT_OPERATION_DURATION_BUCKETS,
+        )
+        self.skill_token_usage = self.meter.create_histogram(
+            name=Meters.GEN_AI_SKILL_TOKEN_USAGE,
+            description="Actual model token usage attributed to an active skill",
+            unit="count",
+            explicit_bucket_boundaries_advisory=_GEN_AI_CLIENT_TOKEN_USAGE_BUCKETS,
+        )
 
     def record_call_llm(
         self,
@@ -319,6 +346,14 @@ class MeterUploader:
             "server_address": server_address,
         }  # required by Volcengine APMPlus
 
+        from veadk.tracing.telemetry.skill_observability import (
+            active_skill_metric_attributes,
+        )
+
+        attributes.update(
+            active_skill_metric_attributes(invocation_context.invocation_id)
+        )
+
         if llm_response.usage_metadata:
             # llm invocation number += 1
             self.llm_invoke_counter.add(1, attributes)
@@ -330,9 +365,17 @@ class MeterUploader:
             if input_token:
                 token_attributes = {**attributes, "gen_ai_token_type": "input"}
                 self.token_usage.record(input_token, attributes=token_attributes)
+                if token_attributes.get("skill_name"):
+                    self.skill_token_usage.record(
+                        input_token, attributes=token_attributes
+                    )
             if output_token:
                 token_attributes = {**attributes, "gen_ai_token_type": "output"}
                 self.token_usage.record(output_token, attributes=token_attributes)
+                if token_attributes.get("skill_name"):
+                    self.skill_token_usage.record(
+                        output_token, attributes=token_attributes
+                    )
 
             # Get llm duration
             span = trace.get_current_span()
@@ -386,6 +429,33 @@ class MeterUploader:
                 # span 耗时
                 duration = (time.time_ns() - span.start_time) / 1e9  # type: ignore
                 self.apmplus_span_latency.record(duration, attributes=attributes)
+
+    def record_skill_operation(
+        self,
+        *,
+        span: Span,
+        operation: str,
+        attributes: dict[str, str],
+        success: bool,
+        error_type: str = "",
+    ) -> None:
+        """Record low-cardinality metrics for one semantic Skill operation."""
+
+        metric_attributes = {
+            **attributes,
+            "skill_operation": operation,
+            "status": "success" if success else "error",
+        }
+        if error_type:
+            metric_attributes["error_type"] = error_type
+
+        self.skill_invoke_counter.add(1, metric_attributes)
+        if not success:
+            self.skill_error_counter.add(1, metric_attributes)
+        if hasattr(span, "start_time"):
+            duration = (time.time_ns() - span.start_time) / 1e9  # type: ignore
+            self.skill_invoke_latency.record(duration, metric_attributes)
+            self.skill_duration_histogram.record(duration, metric_attributes)
 
     def record_tool_call(
         self,

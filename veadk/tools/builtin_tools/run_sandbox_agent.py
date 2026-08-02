@@ -18,6 +18,8 @@ import re
 from typing import Optional
 
 from google.adk.tools import ToolContext
+from opentelemetry import propagate, trace
+from opentelemetry.trace import SpanKind
 
 from veadk.tools.builtin_tools._agentkit import invoke_agentkit_run_code
 from veadk.utils.logger import get_logger
@@ -25,7 +27,27 @@ from veadk.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_PROTECTED_ENV_VARS = frozenset({"TOOL_USER_SESSION_ID", "USER_SESSION_ID"})
+_TRACE_ENV_HEADERS = {
+    "traceparent": "TRACEPARENT",
+    "tracestate": "TRACESTATE",
+}
+_PROTECTED_ENV_VARS = frozenset(
+    {"TOOL_USER_SESSION_ID", "USER_SESSION_ID", *_TRACE_ENV_HEADERS.values()}
+)
+
+tracer = trace.get_tracer("veadk.sandbox_agent")
+
+
+def _current_trace_env_vars() -> dict[str, str]:
+    """Serialize the current W3C trace context for the sandbox subprocess."""
+
+    carrier: dict[str, str] = {}
+    propagate.inject(carrier)
+    return {
+        env_name: carrier[header]
+        for header, env_name in _TRACE_ENV_HEADERS.items()
+        if carrier.get(header)
+    }
 
 
 def _merge_execution_env_vars(
@@ -196,33 +218,41 @@ def run_sandbox_agent(
     tool_user_session_id = agent_name + "_" + user_id + "_" + session_id
     logger.debug(f"tool_user_session_id: {tool_user_session_id}")
 
-    base_env_vars = {
-        "TOOL_USER_SESSION_ID": tool_user_session_id,
-    }
-    skill_space_id = os.getenv("SKILL_SPACE_ID", "")
-    if skill_space_id:
-        base_env_vars["SKILL_SPACE_ID"] = skill_space_id
-    env_vars = _merge_execution_env_vars(base_env_vars, extra_env_vars)
+    with tracer.start_as_current_span(
+        "skill.sandbox.invoke", kind=SpanKind.CLIENT
+    ) as span:
+        span.set_attribute("sandbox.tool.id", tool_id)
+        span.set_attribute("sandbox.session.id", tool_user_session_id)
+        span.set_attribute("sandbox.invoke.mode", "invoke_tool")
 
-    logger.debug(
-        f"Run sandbox agent in session_id={session_id}, tool_id={tool_id}, timeout={timeout}, skills={skills}"
-    )
+        base_env_vars = {
+            "TOOL_USER_SESSION_ID": tool_user_session_id,
+            **_current_trace_env_vars(),
+        }
+        skill_space_id = os.getenv("SKILL_SPACE_ID", "")
+        if skill_space_id:
+            base_env_vars["SKILL_SPACE_ID"] = skill_space_id
+        env_vars = _merge_execution_env_vars(base_env_vars, extra_env_vars)
 
-    cmd = _build_agent_command(workflow_prompt=workflow_prompt, skills=skills)
-    code = _build_agent_runner_code(
-        cmd=cmd,
-        timeout=timeout,
-        env_vars=env_vars,
-        working_dir=working_dir,
-    )
-    res = invoke_agentkit_run_code(
-        tool_id=tool_id,
-        tool_user_session_id=tool_user_session_id,
-        code=code,
-        timeout=timeout,
-        kernel_name="python3",
-        tool_state=tool_context.state if tool_context else None,
-    )
+        logger.debug(
+            f"Run sandbox agent in session_id={session_id}, tool_id={tool_id}, timeout={timeout}, skills={skills}"
+        )
+
+        cmd = _build_agent_command(workflow_prompt=workflow_prompt, skills=skills)
+        code = _build_agent_runner_code(
+            cmd=cmd,
+            timeout=timeout,
+            env_vars=env_vars,
+            working_dir=working_dir,
+        )
+        res = invoke_agentkit_run_code(
+            tool_id=tool_id,
+            tool_user_session_id=tool_user_session_id,
+            code=code,
+            timeout=timeout,
+            kernel_name="python3",
+            tool_state=tool_context.state if tool_context else None,
+        )
     # The response can echo the submitted runner code, including custom env values.
     logger.debug("Invoke run sandbox agent completed")
 

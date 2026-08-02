@@ -170,7 +170,12 @@ class TestMergeExecutionEnvVars(unittest.TestCase):
         )
 
     def test_rejects_framework_managed_values(self):
-        for key in ["TOOL_USER_SESSION_ID", "USER_SESSION_ID"]:
+        for key in [
+            "TOOL_USER_SESSION_ID",
+            "USER_SESSION_ID",
+            "TRACEPARENT",
+            "TRACESTATE",
+        ]:
             with self.subTest(key=key):
                 with self.assertRaisesRegex(ValueError, "managed by VeADK"):
                     self.module._merge_execution_env_vars({}, {key: "spoofed"})
@@ -198,6 +203,27 @@ class TestMergeExecutionEnvVars(unittest.TestCase):
         self.assertIn("env[key] = value", code)
         self.assertNotIn("if key not in env", code)
         self.assertIn('srv_pythonpath = env.get("SRV_PYTHONPATH")', code)
+
+    def test_current_trace_context_is_mapped_to_protected_environment(self):
+        def inject(carrier):
+            carrier.update(
+                {
+                    "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+                    "tracestate": "vendor=value",
+                    "baggage": "secret=must-not-cross-the-boundary",
+                }
+            )
+
+        with patch.object(self.module.propagate, "inject", side_effect=inject):
+            result = self.module._current_trace_env_vars()
+
+        self.assertEqual(
+            result,
+            {
+                "TRACEPARENT": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+                "TRACESTATE": "vendor=value",
+            },
+        )
 
 
 class TestExecuteSkillsSkillApi(unittest.TestCase):
