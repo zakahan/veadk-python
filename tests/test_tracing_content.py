@@ -21,6 +21,7 @@ from veadk.config import settings
 from veadk.tracing.telemetry import telemetry
 from veadk.tracing.telemetry.content_tracing import should_trace_content
 from veadk.tracing.telemetry.exporters.apmplus_exporter import MeterUploader
+from veadk.tracing.telemetry.skill_observability import ActiveSkill, set_active_skill
 
 
 @dataclass
@@ -130,6 +131,9 @@ class _FakeMetricRecorder:
     def record(self, value, attributes=None):
         self.records.append((value, attributes))
 
+    def add(self, value, attributes=None):
+        self.records.append((value, attributes))
+
 
 def _start_test_span(name: str):
     provider = trace_sdk.TracerProvider()
@@ -228,6 +232,56 @@ def test_apmplus_tool_metrics_skip_token_usage_when_tool_content_missing():
 
     assert len(meter_uploader.apmplus_span_latency.records) == 1
     assert meter_uploader.apmplus_tool_token_usage.records == []
+
+
+def test_apmplus_llm_metrics_attribute_actual_tokens_to_active_skill():
+    meter_uploader = object.__new__(MeterUploader)
+    meter_uploader.llm_invoke_counter = _FakeMetricRecorder()
+    meter_uploader.token_usage = _FakeMetricRecorder()
+    meter_uploader.skill_token_usage = _FakeMetricRecorder()
+    meter_uploader.duration_histogram = _FakeMetricRecorder()
+    meter_uploader.chat_exception_counter = _FakeMetricRecorder()
+    meter_uploader.apmplus_span_latency = _FakeMetricRecorder()
+    set_active_skill(ActiveSkill(name="pdf", invocation_id="invocation"))
+
+    with _start_test_span("call_llm"):
+        meter_uploader.record_call_llm(
+            _FakeInvocationContext(),
+            "event-id",
+            _FakeLlmRequest(),
+            _FakeLlmResponse(),
+        )
+
+    assert [value for value, _ in meter_uploader.skill_token_usage.records] == [
+        11,
+        7,
+    ]
+    assert all(
+        attributes["skill_name"] == "pdf"
+        for _, attributes in meter_uploader.skill_token_usage.records
+    )
+
+
+def test_skill_operation_metrics_record_count_error_and_both_durations():
+    meter_uploader = object.__new__(MeterUploader)
+    meter_uploader.skill_invoke_counter = _FakeMetricRecorder()
+    meter_uploader.skill_error_counter = _FakeMetricRecorder()
+    meter_uploader.skill_invoke_latency = _FakeMetricRecorder()
+    meter_uploader.skill_duration_histogram = _FakeMetricRecorder()
+
+    with _start_test_span("skill.run_script") as span:
+        meter_uploader.record_skill_operation(
+            span=span,
+            operation="run_script",
+            attributes={"skill_name": "pdf"},
+            success=False,
+            error_type="skill_execution_error",
+        )
+
+    assert len(meter_uploader.skill_invoke_counter.records) == 1
+    assert len(meter_uploader.skill_error_counter.records) == 1
+    assert len(meter_uploader.skill_invoke_latency.records) == 1
+    assert len(meter_uploader.skill_duration_histogram.records) == 1
 
 
 def test_agent_root_span_skips_content_when_env_false(monkeypatch):

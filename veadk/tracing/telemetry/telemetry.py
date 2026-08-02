@@ -299,6 +299,11 @@ def set_common_attributes_on_model_span(
         for attr_name, attr_extractor in common_attributes.items():
             value = attr_extractor(**kwargs)
             current_span.set_attribute(attr_name, value)
+        from veadk.tracing.telemetry.skill_observability import (
+            set_active_skill_attributes,
+        )
+
+        set_active_skill_attributes(current_span)
     except Exception as e:
         logger.error(f"Failed to set common attributes for spans: {e}")
 
@@ -361,6 +366,10 @@ def trace_tool_call(
     for attr_name, attr_extractor in tool_attributes_mapping.items():
         response: ExtractorResponse = attr_extractor(params)
         ExtractorResponse.update_span(span, attr_name, response)
+
+    from veadk.tracing.telemetry.skill_observability import observe_skill_tool_call
+
+    observe_skill_tool_call(span, tool, args, function_response_event)
 
     _upload_tool_call_metrics(tool, args, function_response_event)
 
