@@ -25,15 +25,147 @@ runner.get_trace_id()    # the trace id to correlate in your backend
 - With **no exporter** the spans are kept in-memory (no creds needed); you still
   get a `trace_id`. Add exporters to also ship them to a platform.
 
+## Agent + custom tool trace
+
+`agent.py` is a complete example: the agent registers a `get_city_weather` tool,
+and the tool creates an additional `weather.lookup` business span. A run produces
+a hierarchy like this:
+
+```text
+Agent invocation
+└── Tool: get_city_weather       # created automatically by VeADK
+    └── weather.lookup          # created by the business code
+```
+
+The essential code is:
+
+```python
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+from veadk import Agent
+from veadk.tracing.telemetry.opentelemetry_tracer import OpentelemetryTracer
+
+weather_tracer = trace.get_tracer("veadk.examples.tracing.weather")
+
+
+def get_city_weather(city: str) -> dict[str, str]:
+    """Get the current weather for a city."""
+    with weather_tracer.start_as_current_span(
+        "weather.lookup",
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        span.set_attribute("weather.city", city.lower().strip())
+        span.set_attribute("weather.provider", "demo-fixed-data")
+        span.add_event("weather.lookup.started")
+
+        try:
+            weather = "Sunny, 25°C"
+            span.set_attribute("weather.found", True)
+            span.add_event("weather.lookup.completed")
+            return {"result": weather}
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
+            raise
+
+
+agent_tracer = OpentelemetryTracer()
+root_agent = Agent(
+    name="traced_agent",
+    instruction="Always use get_city_weather for weather questions.",
+    tools=[get_city_weather],
+    tracers=[agent_tracer],
+)
+```
+
+`OpentelemetryTracer` initializes the global OpenTelemetry provider. Because the
+tool runs inside the agent's active context, `start_as_current_span` makes the
+custom span a child of the tool span; no manual `trace_id` propagation is needed.
+
+- `set_attribute` adds searchable, aggregatable business dimensions.
+- `add_event` records significant events during the span.
+- `record_exception` plus `StatusCode.ERROR` records failures.
+- Do not put API keys, tokens, full user input, or other sensitive data in span
+  attributes or events.
+
 ## Run it
 
 ```bash
-pip install veadk-python
+pip install -r requirements.txt
 cp .env.example .env   # set MODEL_AGENT_API_KEY (+ AK/SK and ENABLE_* to export)
 python main.py
 ```
 
-The script prints which exporters are active, the answer, and the trace id.
+The script prints the active exporters, the agent's answer, and the trace id. The
+default question makes the agent call the custom-traced `get_city_weather` tool.
+
+## Deploy to AgentKit
+
+The deployment entry point in `app.py` uses `AgentkitAgentServerApp` directly:
+
+```python
+from agentkit.apps import AgentkitAgentServerApp
+from veadk.memory.short_term_memory import ShortTermMemory
+
+from agent import create_agent
+
+# AgentKit Runtime already manages the platform APMPlus processor. Do not add a
+# second exporter here.
+root_agent = create_agent()
+
+agent_server = AgentkitAgentServerApp(
+    agent=root_agent,
+    short_term_memory=ShortTermMemory(backend="local"),
+)
+app = agent_server.app
+```
+
+The local `main.py` explicitly calls `build_exporters()` instead. This keeps
+environment-controlled export available locally while preventing AgentKit from
+registering both its platform exporter and a manual exporter for the same spans.
+
+The included `.dockerignore` excludes `.env`, preventing local secrets from
+being copied into the image. Configure the Volcengine AK/SK used by the AgentKit
+CLI on the deployment machine, then create the deployment configuration:
+
+```bash
+export VOLCENGINE_ACCESS_KEY=<deployment-access-key>
+export VOLCENGINE_SECRET_KEY=<deployment-secret-key>
+
+veadk agentkit config \
+  --agent_name custom-trace-agent \
+  --entry_point app.py \
+  --dependencies_file requirements.txt \
+  --language Python \
+  --language_version 3.12 \
+  --launch_type cloud \
+  --cloud_provider volcengine \
+  --region cn-beijing \
+  --runtime_envs MODEL_AGENT_API_KEY=<ark-api-key> \
+  --runtime_envs OTEL_SDK_DISABLED=false \
+  --runtime_envs ENABLE_APMPLUS=true \
+  --runtime_envs OBSERVABILITY_OPENTELEMETRY_APMPLUS_SERVICE_NAME=custom-trace-agent \
+  --runtime_envs OBSERVABILITY_OPENTELEMETRY_APMPLUS_API_KEY=<apmplus-api-key>
+
+veadk agentkit launch
+veadk agentkit status
+veadk agentkit invoke "What is the weather in Beijing?"
+```
+
+The runtime needs at least `MODEL_AGENT_API_KEY`. To see custom spans in a
+platform, it also needs:
+
+- `OTEL_SDK_DISABLED=false`;
+- at least one of `ENABLE_APMPLUS`, `ENABLE_COZELOOP`, or `ENABLE_TLS` enabled;
+- the selected exporter's credentials and service/workspace/topic id;
+- network access from the Runtime to the model and exporter endpoints.
+
+`MODEL_AGENT_NAME`, `MODEL_AGENT_PROVIDER`, `MODEL_AGENT_API_BASE`, `HOST`, and
+`PORT` have defaults and can be overridden as needed. Without an exporter,
+traces remain only in process memory and are not suitable for AgentKit
+production observability.
 
 ## Exporters
 
