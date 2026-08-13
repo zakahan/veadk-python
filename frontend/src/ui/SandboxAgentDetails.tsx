@@ -103,6 +103,7 @@ export function SandboxAgentDetails({
             <dt>{wakeable ? "快照状态" : "工具类型"}</dt>
             <dd>{wakeable ? session.snapshotStatus || "—" : session.toolType || "—"}</dd>
           </div>
+          <div className="is-wide"><dt>Tool ID</dt><dd>{session.toolId || "—"}</dd></div>
           <div><dt>创建时间</dt><dd>{formatDate(session.createdAt)}</dd></div>
           <div>
             <dt>{wakeable ? "快照原因" : "过期时间"}</dt>

@@ -186,6 +186,7 @@ export interface SandboxStartOptions extends SandboxRequestOptions {
 export interface SandboxSession {
   resourceType: "session";
   id: string;
+  toolId: string;
   toolName: "codex" | SandboxAgentKind;
   userSessionId: string;
   displayName: string;
@@ -207,6 +208,7 @@ export interface SandboxSnapshot {
   resourceType: "snapshot";
   id: string;
   snapshotId: string;
+  toolId: string;
   sourceSessionId: string;
   toolName: "codex" | SandboxAgentKind;
   userSessionId: string;
@@ -391,6 +393,7 @@ export interface SandboxSessionSettings {
 
 interface SessionResponse {
   sessionId: string;
+  toolId?: string;
   userSessionId?: string;
   displayName?: string;
   status: string;
@@ -415,6 +418,7 @@ interface ListSessionsResponse {
 interface SnapshotResponse {
   snapshotId: string;
   sessionId?: string;
+  toolId?: string;
   userSessionId?: string;
   displayName?: string;
   status: string;
@@ -493,6 +497,7 @@ function parseSession(
   return {
     resourceType: "session",
     id: data.sessionId,
+    toolId: data.toolId ?? "",
     toolName,
     userSessionId: data.userSessionId ?? "",
     displayName: data.displayName ?? "",
@@ -522,6 +527,7 @@ function parseSnapshot(
     resourceType: "snapshot",
     id: data.snapshotId,
     snapshotId: data.snapshotId,
+    toolId: data.toolId ?? "",
     sourceSessionId: data.sessionId ?? "",
     toolName,
     userSessionId: data.userSessionId ?? "",

@@ -31,7 +31,6 @@ from typing import Annotated, Any, Protocol
 from fastapi import File, Request, UploadFile
 
 from frontend.server.sandbox.tool_sessions import SandboxToolPair
-
 from veadk.cli.agentkit_sandbox_region import is_agentkit_resource_not_found
 from veadk.cli.agentkit_session_metadata import (
     SESSION_DISPLAY_NAME_MAX_LENGTH,
@@ -1965,6 +1964,7 @@ def _public_snapshot(
     return {
         "snapshotId": snapshot.snapshot_id,
         "sessionId": snapshot.session_id,
+        "toolId": snapshot.tool_id,
         "userSessionId": snapshot.user_session_id,
         "status": status,
         "snapshotStatus": snapshot.status,
@@ -2025,6 +2025,7 @@ def mount_sandbox_agent_routes(
     def _public_session(session: SandboxCloudSession, kind: str) -> dict[str, object]:
         return {
             "sessionId": session.instance_id,
+            "toolId": session.tool_id,
             "userSessionId": session.user_session_id,
             "status": session.status,
             "createdAt": session.created_at,
@@ -2243,6 +2244,7 @@ def mount_sandbox_routes(
     def _public_session(session: SandboxCloudSession) -> dict[str, object]:
         return {
             "sessionId": session.instance_id,
+            "toolId": session.tool_id,
             "userSessionId": session.user_session_id,
             "status": session.status,
             "createdAt": session.created_at,

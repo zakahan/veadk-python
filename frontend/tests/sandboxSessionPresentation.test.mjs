@@ -154,6 +154,7 @@ test("active sandbox conversation identifies the selected agent and never uses n
 
 test("sandbox agents expose detail deletion and reusable workspaces", () => {
   assert.match(detailsSource, /Session 详情/);
+  assert.match(detailsSource, /<dt>Tool ID<\/dt><dd>\{session\.toolId \|\| "—"\}<\/dd>/);
   assert.match(detailsSource, /删除智能体/);
   assert.match(detailsSource, /role="alertdialog"/);
   assert.match(detailsSource, /确认删除/);

@@ -472,6 +472,7 @@ def test_managed_agent_routes_create_session_and_return_card_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gateway = _FakeGateway()
+    persistent_tool_id = f"{tool_id}-snapshot"
 
     async def _terminal_url(
         endpoint: str,
@@ -523,6 +524,7 @@ def test_managed_agent_routes_create_session_and_return_card_data(
 
     assert created.status_code == 200
     assert created.json()["toolName"] == kind
+    assert created.json()["toolId"] == persistent_tool_id
     assert created.json()["displayName"] == f"我的 {kind}"
     assert created.json()["persistent"] is True
     assert created.json()["expireAt"] == "2026-07-30T17:00:00Z"
@@ -530,10 +532,12 @@ def test_managed_agent_routes_create_session_and_return_card_data(
     assert tool_id in gateway.tool_ids
     assert f"{tool_id}-snapshot" in gateway.tool_ids
     assert listed.status_code == 200
+    assert listed.json()["sessions"][0]["toolId"] == persistent_tool_id
     assert [item["sessionId"] for item in listed.json()["sessions"]] == [
         created.json()["sessionId"]
     ]
     assert opened.status_code == 200
+    assert opened.json()["toolId"] == persistent_tool_id
     assert opened.json()["webuiUrl"].startswith(
         f"/web/{kind}/sessions/{session_id}/surface/"
     )
@@ -776,6 +780,7 @@ def test_sandbox_routes_list_create_connect_and_disconnect() -> None:
         "sessions": [
             {
                 "sessionId": "remote-existing",
+                "toolId": "tool-studio",
                 "userSessionId": "existing-agent",
                 "status": "Ready",
                 "createdAt": "2026-07-30T08:00:00Z",
@@ -926,15 +931,22 @@ def test_sandbox_routes_select_and_resolve_both_tool_variants() -> None:
 
     assert persistent.status_code == 200
     assert persistent.json()["persistent"] is True
+    assert persistent.json()["toolId"] == "tool-studio-snapshot"
     assert gateway.sessions[persistent.json()["sessionId"]].tool_id == (
         "tool-studio-snapshot"
     )
     assert temporary.status_code == 200
     assert temporary.json()["persistent"] is False
+    assert temporary.json()["toolId"] == "tool-studio"
     assert gateway.deleted[0].tool_id == "tool-studio"
     assert invalid.status_code == 422
+    assert {item["toolId"] for item in listed.json()["sessions"]} == {
+        "tool-studio",
+        "tool-studio-snapshot",
+    }
     assert {item["persistent"] for item in listed.json()["sessions"]} == {False, True}
     assert opened_persistent.json()["persistent"] is True
+    assert opened_persistent.json()["toolId"] == "tool-studio-snapshot"
     assert deleted_temporary.json() == {"deleted": True}
 
 
@@ -1026,8 +1038,12 @@ def test_sandbox_snapshot_is_wakeable_for_admin_only() -> None:
         "snapshot-alice",
         "snapshot-bob",
     }
+    assert {item["toolId"] for item in admin_list.json()["snapshots"]} == {
+        "tool-studio-snapshot",
+    }
     assert resumed.status_code == 404
     assert admin_resumed.json()["sessionId"] == "resumed-snapshot-alice"
+    assert admin_resumed.json()["toolId"] == "tool-studio-snapshot"
     assert admin_resumed.json()["persistent"] is True
     assert deleted.json() == {"deleted": True}
 
