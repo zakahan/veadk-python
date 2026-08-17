@@ -237,6 +237,30 @@ Temporary Sandbox state is process-local. Run Studio with one server worker, or
 configure session affinity so create, message, and delete requests from the same
 browser reach the same instance.
 
+## Studio BFF reverse tools
+
+Studio can expose local or intranet-only tools to a compatible AgentKit Runtime
+without giving the Studio BFF a public address. For each remote `run_sse`
+request, the BFF first tries an outbound WSS connection to
+`/harness/studio-channel/v1`. If the public gateway doesn't support WebSocket
+Upgrade, it automatically falls back to a streaming HTTP/SSE downlink plus HTTP
+tool-result posts. It publishes the current tool catalog, executes `tool.call`
+messages locally, and returns `tool.result` without exposing a BFF endpoint. The
+Runtime sees ordinary tools, but receives neither the executor implementation nor
+its credentials. The HTTP fallback currently requires exactly one Runtime
+instance so its stream and result posts reach the same process.
+
+Set `VEADK_STUDIO_TOOL_CHANNEL=demo` to enable the two built-in verification
+tools. Set `VEADK_STUDIO_TOOL_MODULE` to an importable module that exports
+`register_tools(registry)` to add BFF tools; Studio rebuilds the registry at
+startup, so restart Studio after changing that module. For application-level
+channel authentication, give both Studio and Runtime the same
+`VEADK_STUDIO_CHANNEL_TOKEN`. Runtime API-key or Identity authorization is still
+forwarded during the WebSocket handshake.
+
+A deployable Runtime agent, custom BFF tool, and launch scripts live in the
+[local reverse-tool example](../.agents/local/studio/A_BFF_tool_for_runtime/examples/README.md).
+
 Local Studio reads transient and snapshot Tool IDs from
 `SANDBOX_CHAT_CODEX`/`SANDBOX_CHAT_CODEX_SNAPSHOT`,
 `SANDBOX_CHAT_OPENCLAW`/`SANDBOX_CHAT_OPENCLAW_SNAPSHOT`, and

@@ -34,6 +34,83 @@ from veadk.cli.cli_frontend import (
 )
 
 
+def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "demo")
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    opened: dict[str, Any] = {}
+
+    class _FakeStudioRun:
+        async def stream(self):
+            yield b'data: {"id":"event-1","author":"agent"}\n\n'
+
+    async def fake_open_studio_tool_run(**kwargs: Any) -> _FakeStudioRun:
+        opened.update(kwargs)
+        return _FakeStudioRun()
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.open_studio_tool_run",
+        fake_open_studio_tool_run,
+    )
+
+    class _UnexpectedHttpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+            raise AssertionError("run_sse must not open a separate HTTP connection")
+
+    monkeypatch.setattr("httpx.AsyncClient", _UnexpectedHttpClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.text == 'data: {"id":"event-1","author":"agent"}\n\n'
+    assert opened["endpoint"] == "https://runtime.example"
+    assert opened["authorization"] == "Bearer runtime-api-key"
+    assert opened["runtime_id"] == "runtime-1"
+    assert {item["name"] for item in opened["registry"].manifests()} == {
+        "studio_current_time",
+        "studio_multiply",
+    }
+
+
 def _create_frontend_app(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

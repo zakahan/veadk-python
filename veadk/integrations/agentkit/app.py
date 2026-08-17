@@ -22,7 +22,7 @@ import json
 import os
 import threading
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -38,6 +38,7 @@ from google.adk.agents.run_config import StreamingMode
 from google.adk.apps.app import App
 from google.adk.cli.adk_web_server import RunAgentRequest
 from google.adk.runners import Runner as AdkRunner
+from google.adk.tools.base_tool import BaseTool
 from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
@@ -872,24 +873,33 @@ def _configure_session_capability_routes(
     setattr(app.state, _SESSION_CAPABILITY_SERVICE_STATE_KEY, capability_service)
     mount_session_capability_routes(app=app, service=capability_service)
 
-    @app.post("/harness/run_sse")
-    async def run_agent_sse_with_session_capabilities(
+    async def _build_run(
         req: RunAgentRequest,
-    ) -> StreamingResponse:
+        studio_tools: list[BaseTool] | None = None,
+    ) -> tuple[AdkRunner, StreamingMode]:
         app_name = _resolve_run_app_name(services, root_agent, req)
-        try:
-            run_agent = await capability_service.build_agent(
-                app_name=app_name,
-                user_id=req.user_id,
-                session_id=req.session_id,
-            )
-        except CapabilityError as exc:
-            raise HTTPException(
-                status_code=exc.status_code,
-                detail=str(exc),
-            ) from exc
-
+        run_agent = await capability_service.build_agent(
+            app_name=app_name,
+            user_id=req.user_id,
+            session_id=req.session_id,
+        )
         _add_dynamic_a2a_agent_tools(run_agent, _content_text(req.new_message))
+        if studio_tools:
+            agent_tools = getattr(run_agent, "tools", None)
+            if agent_tools is None:
+                raise CapabilityError(
+                    "Studio tools can only be mounted on an agent with tools."
+                )
+            existing_names = {_tool_label(tool) for tool in agent_tools}
+            conflicts = sorted(
+                {_tool_label(tool) for tool in studio_tools} & existing_names
+            )
+            if conflicts:
+                raise CapabilityError(
+                    "Studio tool names conflict with the Agent: " + ", ".join(conflicts)
+                )
+            agent_tools.extend(studio_tools)
+
         runner = AdkRunner(
             app=App(name=app_name, root_agent=run_agent, plugins=[]),
             artifact_service=services.artifact_service,
@@ -899,52 +909,90 @@ def _configure_session_capability_routes(
             auto_create_session=services.auto_create_session,
         )
         stream_mode = StreamingMode.SSE if req.streaming else StreamingMode.NONE
+        return runner, stream_mode
+
+    async def _run_events(
+        req: RunAgentRequest,
+        runner: AdkRunner,
+        stream_mode: StreamingMode,
+    ) -> AsyncIterator[Any]:
         custom_metadata = _run_request_custom_metadata(req)
+        async with Aclosing(
+            runner.run_async(
+                user_id=req.user_id,
+                session_id=req.session_id,
+                new_message=req.new_message,
+                state_delta=req.state_delta,
+                run_config=RunConfig(
+                    streaming_mode=stream_mode,
+                    custom_metadata=custom_metadata,
+                ),
+                invocation_id=req.invocation_id,
+            )
+        ) as agen:
+            async for event in agen:
+                events_to_stream = [event]
+                if (
+                    not req.function_call_event_id
+                    and event.actions.artifact_delta
+                    and event.content
+                    and event.content.parts
+                ):
+                    content_event = event.model_copy(deep=True)
+                    content_event.actions.artifact_delta = {}
+                    artifact_event = event.model_copy(deep=True)
+                    artifact_event.content = None
+                    events_to_stream = [content_event, artifact_event]
+                for event_to_stream in events_to_stream:
+                    yield event_to_stream
+
+    @app.post("/harness/run_sse")
+    async def run_agent_sse_with_session_capabilities(
+        req: RunAgentRequest,
+    ) -> StreamingResponse:
+        try:
+            runner, stream_mode = await _build_run(req)
+        except CapabilityError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=str(exc),
+            ) from exc
 
         async def event_generator():
             try:
-                async with Aclosing(
-                    runner.run_async(
-                        user_id=req.user_id,
-                        session_id=req.session_id,
-                        new_message=req.new_message,
-                        state_delta=req.state_delta,
-                        run_config=RunConfig(
-                            streaming_mode=stream_mode,
-                            custom_metadata=custom_metadata,
-                        ),
-                        invocation_id=req.invocation_id,
+                async for event in _run_events(req, runner, stream_mode):
+                    yield (
+                        "data: "
+                        + event.model_dump_json(exclude_none=True, by_alias=True)
+                        + "\n\n"
                     )
-                ) as agen:
-                    async for event in agen:
-                        events_to_stream = [event]
-                        if (
-                            not req.function_call_event_id
-                            and event.actions.artifact_delta
-                            and event.content
-                            and event.content.parts
-                        ):
-                            content_event = event.model_copy(deep=True)
-                            content_event.actions.artifact_delta = {}
-                            artifact_event = event.model_copy(deep=True)
-                            artifact_event.content = None
-                            events_to_stream = [content_event, artifact_event]
-
-                        for event_to_stream in events_to_stream:
-                            yield (
-                                "data: "
-                                + event_to_stream.model_dump_json(
-                                    exclude_none=True,
-                                    by_alias=True,
-                                )
-                                + "\n\n"
-                            )
             except Exception as exc:  # noqa: BLE001 - SSE surfaces errors as data.
                 yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     _promote_route(app, run_agent_sse_with_session_capabilities)
+
+    async def _studio_channel_run(
+        payload: dict[str, Any],
+        studio_tools: list[BaseTool],
+    ) -> AsyncIterator[dict[str, Any]]:
+        req = RunAgentRequest.model_validate(payload)
+        runner, stream_mode = await _build_run(req, studio_tools)
+        async for event in _run_events(req, runner, stream_mode):
+            yield event.model_dump(exclude_none=True, by_alias=True, mode="json")
+
+    from veadk.integrations.agentkit.studio_channel import (
+        mount_studio_channel_routes,
+    )
+
+    mount_studio_channel_routes(
+        app=app,
+        run_handler=_studio_channel_run,
+        reserved_tool_names={
+            _tool_label(tool) for tool in getattr(root_agent, "tools", None) or []
+        },
+    )
 
 
 def configure_multi_app_session_capability_routes(
