@@ -21,10 +21,10 @@ import importlib
 import inspect
 import os
 from collections.abc import Callable
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from types import MappingProxyType
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -47,6 +47,7 @@ class StudioTool:
     description: str
     input_schema: dict[str, Any]
     executor: ToolExecutor
+    display_name: str = ""
     executor_revision: str = "v1"
     timeout_ms: int = 30_000
     idempotent: bool = False
@@ -88,19 +89,41 @@ class StudioToolRegistry:
         self._latest[manifest.name] = manifest.executor_revision
 
     def manifests(self) -> list[dict[str, Any]]:
-        manifests = [
-            self._tools[(name, revision)].manifest().model_dump(mode="json")
-            for name, revision in sorted(self._latest.items())
-        ]
-        return manifests
+        return self.snapshot().manifests()
 
     @property
     def revision(self) -> str:
-        return catalog_revision(self.manifests())
+        return self.snapshot().revision
 
     @property
     def enabled(self) -> bool:
         return bool(self._latest)
+
+    def public_items(self) -> list[dict[str, Any]]:
+        return self.snapshot().public_items()
+
+    def snapshot(
+        self, selected_names: Sequence[str] | None = None
+    ) -> StudioToolCatalogSnapshot:
+        """Freeze selected latest tool revisions for one run.
+
+        ``None`` preserves the legacy full-catalog behavior. An explicit empty
+        sequence selects no BFF tools.
+        """
+
+        names = (
+            sorted(self._latest)
+            if selected_names is None
+            else list(dict.fromkeys(selected_names))
+        )
+        unknown = sorted(set(names) - self._latest.keys())
+        if unknown:
+            raise ValueError("Unknown Studio tools: " + ", ".join(unknown))
+        tools = {
+            (name, self._latest[name]): self._tools[(name, self._latest[name])]
+            for name in names
+        }
+        return StudioToolCatalogSnapshot(tools)
 
     async def execute(
         self,
@@ -126,74 +149,65 @@ class StudioToolRegistry:
         return await asyncio.to_thread(tool.executor, arguments)
 
 
-def _register_demo_tools(registry: StudioToolRegistry) -> None:
-    def current_time(arguments: dict[str, Any]) -> dict[str, Any]:
-        timezone_name = str(arguments.get("timezone") or "Asia/Shanghai")
-        now = datetime.now(ZoneInfo(timezone_name))
-        return {
-            "timezone": timezone_name,
-            "iso_time": now.isoformat(),
-            "executed_by": "studio-bff",
-            "bff_process_id": os.getpid(),
-        }
+class StudioToolCatalogSnapshot:
+    """Immutable per-run view of BFF manifests and executors."""
 
-    registry.register(
-        StudioTool(
-            name="studio_current_time",
-            description=(
-                "Return the current time from the local VeADK Studio BFF. Use this "
-                "when the user asks for the current time and mention that execution "
-                "was confirmed on the Studio BFF."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "timezone": {
-                        "type": "string",
-                        "enum": ["Asia/Shanghai", "UTC"],
-                        "description": "Timezone used to format the current time.",
-                    }
-                },
-                "additionalProperties": False,
-            },
-            executor=current_time,
-            executor_revision="demo-time-v1",
-            idempotent=True,
+    def __init__(self, tools: dict[tuple[str, str], StudioTool]) -> None:
+        self._tools = MappingProxyType(dict(tools))
+        self._latest = MappingProxyType(
+            {name: revision for name, revision in self._tools}
         )
-    )
-
-    def multiply(arguments: dict[str, Any]) -> dict[str, Any]:
-        left = int(arguments["left"])
-        right = int(arguments["right"])
-        return {
-            "left": left,
-            "right": right,
-            "product": left * right,
-            "executed_by": "studio-bff",
-            "bff_process_id": os.getpid(),
-        }
-
-    registry.register(
-        StudioTool(
-            name="studio_multiply",
-            description=(
-                "Multiply two integers in the local VeADK Studio BFF. Always use "
-                "this tool for multiplication so the reverse tool channel can be verified."
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "left": {"type": "integer"},
-                    "right": {"type": "integer"},
-                },
-                "required": ["left", "right"],
-                "additionalProperties": False,
-            },
-            executor=multiply,
-            executor_revision="demo-multiply-v1",
-            idempotent=True,
+        self._manifests = tuple(
+            self._tools[(name, revision)].manifest().model_dump(mode="json")
+            for name, revision in sorted(self._latest.items())
         )
-    )
+        self._revision = catalog_revision(list(self._manifests))
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._tools)
+
+    @property
+    def revision(self) -> str:
+        return self._revision
+
+    def manifests(self) -> list[dict[str, Any]]:
+        return [dict(manifest) for manifest in self._manifests]
+
+    def public_items(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": name,
+                "name": tool.display_name or name,
+                "description": tool.description,
+                "riskLevel": tool.risk_level,
+            }
+            for (name, revision), tool in sorted(self._tools.items())
+            if self._latest[name] == revision
+        ]
+
+    async def execute(
+        self,
+        *,
+        name: str,
+        executor_revision: str,
+        arguments: dict[str, Any],
+    ) -> Any:
+        tool = self._tools.get((name, executor_revision))
+        if tool is None:
+            raise StudioToolExecutionError(
+                f"Studio tool is unavailable in this run: {name}@{executor_revision}"
+            )
+        try:
+            Draft202012Validator(tool.input_schema).validate(arguments)
+        except ValidationError as error:
+            raise StudioToolExecutionError(
+                f"Invalid arguments for Studio tool {name}: {error.message}"
+            ) from error
+
+        if inspect.iscoroutinefunction(tool.executor):
+            return await tool.executor(arguments)
+        return await asyncio.to_thread(tool.executor, arguments)
 
 
 def build_studio_tool_registry() -> StudioToolRegistry:
@@ -201,8 +215,12 @@ def build_studio_tool_registry() -> StudioToolRegistry:
 
     registry = StudioToolRegistry()
     mode = os.getenv("VEADK_STUDIO_TOOL_CHANNEL", "").strip().lower()
-    if mode in {"1", "true", "yes", "demo"}:
-        _register_demo_tools(registry)
+    if mode in {"1", "true", "yes", "demo", "bytedcli"}:
+        from frontend.server.studio_tools.bytedcli_tools import (
+            register_bytedcli_tools,
+        )
+
+        register_bytedcli_tools(registry)
 
     module_name = os.getenv("VEADK_STUDIO_TOOL_MODULE", "").strip()
     if module_name:

@@ -256,15 +256,29 @@ and keeps the original `run_sse` path without publishing a BFF catalog. Opting i
 enables dynamic injection but doesn't define or persist any concrete BFF tool on
 the Agent.
 
-Set `VEADK_STUDIO_TOOL_CHANNEL=demo` to enable the two built-in verification
-tools. Set `VEADK_STUDIO_TOOL_MODULE` to an importable module that exports
+For a compatible remote Runtime, the composer `+` menu exposes **本地工具**.
+Each switch controls the complete BFF tool catalog sent with the next
+`run_sse`. New chats start with every local tool disabled; an existing session
+keeps its selection in the current browser process between turns. The BFF
+validates the submitted IDs and freezes an immutable catalog-and-executor
+snapshot for that run, so simultaneous users and sessions cannot add tools to
+one another. An explicit empty selection uses the ordinary `run_sse` path;
+omitting `platform_tools` preserves the legacy all-tools behavior for older
+clients. Tool code and credentials stay local, but selected tool results are
+sent to the cloud Agent as part of its tool conversation.
+
+Set `VEADK_STUDIO_TOOL_CHANNEL=bytedcli` to enable the three Studio-owned,
+read-only tools for LogID lookup, Codebase MR status, and reading a Lark document URL.
+They execute the locally installed and authenticated `bytedcli`; `demo` remains
+a compatibility alias for this mode. Set `VEADK_STUDIO_TOOL_MODULE` to an
+importable module that exports
 `register_tools(registry)` to add BFF tools; Studio rebuilds the registry at
 startup, so restart Studio after changing that module. For application-level
 channel authentication, give both Studio and Runtime the same
 `VEADK_STUDIO_CHANNEL_TOKEN`. Runtime API-key or Identity authorization is still
 forwarded during the WebSocket handshake.
 
-A deployable Runtime agent, custom BFF tool, and launch scripts live in the
+A deployable Runtime agent and launch scripts live in the
 [local reverse-tool example](../.agents/local/studio/A_BFF_tool_for_runtime/examples/README.md).
 
 ## Studio BFF dynamic routes

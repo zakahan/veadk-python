@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from frontend.server.studio_tools.registry import (
@@ -43,6 +45,24 @@ def _registry() -> StudioToolRegistry:
         )
     )
     return registry
+
+
+def _register_echo(registry: StudioToolRegistry) -> None:
+    registry.register(
+        StudioTool(
+            name="studio_echo",
+            display_name="Echo",
+            description="Echo text in Studio.",
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            executor=lambda args: {"text": args["text"]},
+            executor_revision="v1",
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -104,3 +124,82 @@ async def test_new_executor_revision_becomes_the_next_catalog_snapshot() -> None
         executor_revision="v2",
         arguments={"left": 3, "right": 5},
     ) == {"product": 15, "revision": "v2"}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_contains_only_selected_tools_and_executors() -> None:
+    registry = _registry()
+    _register_echo(registry)
+
+    snapshot = registry.snapshot(["studio_echo"])
+
+    assert [item["name"] for item in snapshot.manifests()] == ["studio_echo"]
+    assert snapshot.public_items() == [
+        {
+            "id": "studio_echo",
+            "name": "Echo",
+            "description": "Echo text in Studio.",
+            "riskLevel": "low",
+        }
+    ]
+    assert await snapshot.execute(
+        name="studio_echo",
+        executor_revision="v1",
+        arguments={"text": "hello"},
+    ) == {"text": "hello"}
+    with pytest.raises(StudioToolExecutionError, match="unavailable in this run"):
+        await snapshot.execute(
+            name="studio_multiply",
+            executor_revision="v1",
+            arguments={"left": 6, "right": 7},
+        )
+
+
+def test_snapshots_are_independent_and_do_not_mutate_the_registry() -> None:
+    registry = _registry()
+    _register_echo(registry)
+
+    first = registry.snapshot(["studio_multiply"])
+    second = registry.snapshot(["studio_echo"])
+
+    assert [item["name"] for item in first.manifests()] == ["studio_multiply"]
+    assert [item["name"] for item in second.manifests()] == ["studio_echo"]
+    assert {item["name"] for item in registry.manifests()} == {
+        "studio_echo",
+        "studio_multiply",
+    }
+
+
+def test_snapshot_rejects_unknown_tool_ids() -> None:
+    with pytest.raises(ValueError, match="Unknown Studio tools: missing"):
+        _registry().snapshot(["missing"])
+
+
+@pytest.mark.asyncio
+async def test_concurrent_run_snapshots_do_not_cross_selected_tools() -> None:
+    registry = _registry()
+    _register_echo(registry)
+    multiply_catalog = registry.snapshot(["studio_multiply"])
+    echo_catalog = registry.snapshot(["studio_echo"])
+
+    multiply_result, echo_result = await asyncio.gather(
+        multiply_catalog.execute(
+            name="studio_multiply",
+            executor_revision="v1",
+            arguments={"left": 8, "right": 9},
+        ),
+        echo_catalog.execute(
+            name="studio_echo",
+            executor_revision="v1",
+            arguments={"text": "session-b"},
+        ),
+    )
+
+    assert multiply_result == {"product": 72}
+    assert echo_result == {"text": "session-b"}
+    with pytest.raises(StudioToolExecutionError, match="unavailable in this run"):
+        await echo_catalog.execute(
+            name="studio_multiply",
+            executor_revision="v1",
+            arguments={"left": 8, "right": 9},
+        )

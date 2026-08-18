@@ -1815,6 +1815,8 @@ export interface RunArgs {
   text: string;
   attachments?: Attachment[];
   invocation?: FrontendInvocation;
+  /** Complete set of local BFF tool IDs selected for this run. */
+  platformTools?: readonly string[];
   /** Function responses to send instead of/alongside text — used to resume a
    *  long-running call (e.g. answering ADK's `adk_request_credential`). */
   functionResponses?: { id: string; name: string; response: unknown }[];
@@ -1832,6 +1834,7 @@ export async function* runSSE({
   text,
   attachments = [],
   invocation,
+  platformTools,
   functionResponses = [],
   signal,
   sessionCapabilities = false,
@@ -1890,6 +1893,9 @@ export async function* runSSE({
         session_id: sessionId,
         new_message: { role: "user", parts },
         streaming: true,
+        ...(platformTools !== undefined
+          ? { platform_tools: [...platformTools] }
+          : {}),
         custom_metadata: invocationMetadata
           ? { veadkInvocation: invocationMetadata }
           : undefined,
@@ -2885,6 +2891,38 @@ export interface RuntimeRouteChannelStatus {
   supported: boolean;
   connected: boolean;
   catalogRevision: string | null;
+}
+
+export interface StudioBffTool {
+  id: string;
+  name: string;
+  description: string;
+  riskLevel: string;
+}
+
+export interface RuntimeStudioToolCapabilities {
+  enabled: boolean;
+  supported: boolean;
+  tools: StudioBffTool[];
+}
+
+/** List BFF-local tools without exposing their schemas or local executors. */
+export async function getRuntimeStudioToolCapabilities(
+  runtimeId: string,
+  region: string,
+): Promise<RuntimeStudioToolCapabilities> {
+  const params = new URLSearchParams({ region });
+  const res = await apiFetch(
+    `/web/runtime-tool-channel/${encodeURIComponent(runtimeId)}/capabilities?${params.toString()}`,
+  );
+  if (!res.ok) {
+    throw new RuntimeProbeError(
+      await httpErrorMessage(res, "读取本地工具失败"),
+      false,
+      true,
+    );
+  }
+  return (await res.json()) as RuntimeStudioToolCapabilities;
 }
 
 /** Ask the local Studio BFF to keep a persistent reverse-route channel to the

@@ -34,6 +34,7 @@ import {
   getSessionCapabilities,
   getSession,
   getStudioAccess,
+  getRuntimeStudioToolCapabilities,
   getRuntimes,
   listApps,
   listModelOptions,
@@ -60,6 +61,7 @@ import {
   type MessageFeedbackRating,
   type SiteBranding,
   type SessionCapabilities,
+  type RuntimeStudioToolCapabilities,
   type StudioAccess,
   type UiConfig,
   type UiFeatures,
@@ -351,6 +353,14 @@ const EMPTY_STRING_ARR: string[] = [];
 
 function emptyInvocation(): FrontendInvocation {
   return { skills: [] };
+}
+
+function studioToolSelectionKey(
+  appName: string,
+  userId: string,
+  sessionId: string,
+): string {
+  return `${appName}\u0000${userId}\u0000${sessionId}`;
 }
 
 async function loadSandboxThreadHistory(
@@ -1285,6 +1295,14 @@ export default function App() {
     newChatCapabilities.ready === true && newChatCapabilities.agentId === appName;
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [invocation, setInvocation] = useState<FrontendInvocation>(emptyInvocation);
+  const [studioToolCapabilities, setStudioToolCapabilities] =
+    useState<RuntimeStudioToolCapabilities | null>(null);
+  const [studioToolsLoading, setStudioToolsLoading] = useState(false);
+  const [studioToolsError, setStudioToolsError] = useState("");
+  const [draftStudioToolIds, setDraftStudioToolIds] = useState<string[]>([]);
+  const [studioToolIdsBySession, setStudioToolIdsBySession] = useState<
+    Record<string, string[]>
+  >({});
   const [agentInfo, setAgentInfo] = useState<AgentInfo | null>(null);
   const [agentInfoRefreshKey, setAgentInfoRefreshKey] = useState(0);
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
@@ -4460,6 +4478,7 @@ export default function App() {
     setInitializingSession(false);
     setPendingTurns([]);
     setInvocation(emptyInvocation());
+    setDraftStudioToolIds([]);
     discardDraftAttachments(attachments);
     setAttachments([]);
     if (abandonedSession) void abandonDraftSession(abandonedSession);
@@ -4791,6 +4810,7 @@ export default function App() {
     atts: Attachment[] = [],
     selectedInvocation: FrontendInvocation = emptyInvocation(),
     messageSource: AgentMessageSource = "composer",
+    selectedPlatformTools?: readonly string[],
   ) {
     // `busy` here = the CURRENT session is already streaming (can't double-send
     // to it). Other sessions can stream concurrently.
@@ -4803,6 +4823,7 @@ export default function App() {
     ) return;
     setError("");
     const createsSession = !sessionId;
+    const platformTools = selectedPlatformTools ?? selectedStudioToolIds;
     const sessionState = createsSession ? "new" : "existing";
     const trackRuntimeMessage = Boolean(currentRuntime);
     const messageOperation = currentRuntime
@@ -4909,6 +4930,13 @@ export default function App() {
       createsSession ? optimisticTurns : [...current, ...optimisticTurns],
     );
     if (createsSession) {
+      if (currentRuntime) {
+        const key = studioToolSelectionKey(appName, userId, sid);
+        setStudioToolIdsBySession((current) => ({
+          ...current,
+          [key]: [...platformTools],
+        }));
+      }
       viewSidRef.current = sid;
       setSessionId(sid);
       setPendingTurns([]);
@@ -4942,6 +4970,7 @@ export default function App() {
         text,
         attachments: atts,
         invocation: selectedInvocation,
+        platformTools: currentRuntime ? platformTools : undefined,
         signal: ctrl.signal,
         sessionCapabilities: runWithSessionCapabilities,
       })) {
@@ -5182,6 +5211,54 @@ export default function App() {
     }
   }
 
+  // Hooks must stay above the authentication returns below. Connection state
+  // may survive an auth transition, so discovery also waits for resolved access.
+  const currentConn = connections.find(
+    (connection) =>
+      connection.runtimeId &&
+      connection.apps.some(
+        (candidate) => remoteAppId(connection.id, candidate) === appName,
+      ),
+  );
+  const currentRuntime =
+    currentConn && currentConn.runtimeId && currentConn.region
+      ? {
+          runtimeId: currentConn.runtimeId,
+          name: currentConn.name,
+          region: currentConn.region,
+        }
+      : undefined;
+
+  useEffect(() => {
+    let cancelled = false;
+    setStudioToolCapabilities(null);
+    setStudioToolsError("");
+    if (authStatus !== "authenticated" || !access || !currentRuntime) {
+      setStudioToolsLoading(false);
+      return;
+    }
+    setStudioToolsLoading(true);
+    getRuntimeStudioToolCapabilities(
+      currentRuntime.runtimeId,
+      currentRuntime.region,
+    )
+      .then((capabilities) => {
+        if (!cancelled) setStudioToolCapabilities(capabilities);
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        setStudioToolsError(
+          cause instanceof Error ? cause.message : "读取本地工具失败",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setStudioToolsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [access, authStatus, currentRuntime?.region, currentRuntime?.runtimeId]);
+
   if (authError) {
     return (
       <div className="boot boot-error">
@@ -5245,17 +5322,39 @@ export default function App() {
   const labelOf = (id: string) => agentEntries.find((e) => e.id === id)?.label ?? id;
   // The runtime backing the current selection (if it's a cloud runtime app) —
   // drives the picker's side detail panel.
-  const currentConn = connections.find(
-    (c) => c.runtimeId && c.apps.some((a) => remoteAppId(c.id, a) === appName),
+  const activeStudioToolSelectionKey = sessionId
+    ? studioToolSelectionKey(appName, userId, sessionId)
+    : "";
+  const storedStudioToolIds = sessionId
+    ? (studioToolIdsBySession[activeStudioToolSelectionKey] ?? [])
+    : draftStudioToolIds;
+  const availableStudioToolIds = new Set(
+    studioToolCapabilities?.tools.map((tool) => tool.id) ?? [],
   );
-  const currentRuntime =
-    currentConn && currentConn.runtimeId && currentConn.region
-      ? {
-          runtimeId: currentConn.runtimeId,
-          name: currentConn.name,
-          region: currentConn.region,
-        }
-      : undefined;
+  const selectedStudioToolIds = storedStudioToolIds.filter((toolId) =>
+    availableStudioToolIds.has(toolId),
+  );
+  const updateSelectedStudioToolIds = (selectedIds: string[]) => {
+    const next = [...new Set(selectedIds)].filter((toolId) =>
+      availableStudioToolIds.has(toolId),
+    );
+    if (!sessionId) {
+      setDraftStudioToolIds(next);
+      return;
+    }
+    setStudioToolIdsBySession((current) => ({
+      ...current,
+      [activeStudioToolSelectionKey]: next,
+    }));
+  };
+
+  const studioToolsUnavailableReason = studioToolsError
+    ? studioToolsError
+    : studioToolCapabilities && !studioToolCapabilities.enabled
+      ? "本地 Studio BFF 没有配置工具。"
+      : studioToolCapabilities && !studioToolCapabilities.supported
+        ? "当前 Runtime Agent 未开启 BFF 工具能力。"
+        : "";
   const connectedRuntimeId = currentRuntime?.runtimeId ?? "";
   const currentRuntimeAppName = currentConn
     ? currentConn.apps.find((app) =>
@@ -6075,7 +6174,13 @@ export default function App() {
                 const selectedInvocation = invocation;
                 setAttachments([]);
                 setInvocation(emptyInvocation());
-                send(text, atts, selectedInvocation);
+                send(
+                  text,
+                  atts,
+                  selectedInvocation,
+                  "composer",
+                  selectedStudioToolIds,
+                );
                 releaseAttachmentPreviews(atts);
               }}
               onStop={busy ? stopCurrentGeneration : undefined}
@@ -6099,6 +6204,17 @@ export default function App() {
               }
               showMeta={turns.length > 0 && !sandboxSession}
               attachments={sandboxSession ? [] : attachments}
+              studioTools={
+                !sandboxSession && currentRuntime
+                  ? {
+                      tools: studioToolCapabilities?.tools ?? [],
+                      selectedIds: selectedStudioToolIds,
+                      loading: studioToolsLoading,
+                      unavailableReason: studioToolsUnavailableReason,
+                      onChange: updateSelectedStudioToolIds,
+                    }
+                  : undefined
+              }
               skills={sandboxSession ? [] : availableSkills}
               agents={sandboxSession ? [] : availableAgents}
               invocation={sandboxSession ? emptyInvocation() : invocation}

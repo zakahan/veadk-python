@@ -30,8 +30,8 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from frontend.server.studio_tools.registry import (
+    StudioToolCatalogSnapshot,
     StudioToolExecutionError,
-    StudioToolRegistry,
 )
 from veadk.integrations.agentkit.studio_channel.protocol import (
     CAPABILITIES_SUFFIX,
@@ -44,9 +44,29 @@ from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+MAX_TOOL_RESULT_BYTES = 128 * 1024
+TOOL_RESULT_PREVIEW_BYTES = 64 * 1024
+
 
 class StudioChannelError(RuntimeError):
     """A connection or protocol failure safe to surface to Studio."""
+
+
+def _bounded_tool_result(content: Any) -> Any:
+    encoded = json.dumps(content, ensure_ascii=False).encode("utf-8")
+    if len(encoded) <= MAX_TOOL_RESULT_BYTES:
+        return content
+    preview = encoded[:TOOL_RESULT_PREVIEW_BYTES].decode("utf-8", errors="replace")
+    result: dict[str, Any] = {
+        "truncated": True,
+        "original_size_bytes": len(encoded),
+        "preview": preview,
+    }
+    if isinstance(content, dict):
+        for key in ("ok", "error", "executed_by", "bff_process_id"):
+            if key in content:
+                result[key] = content[key]
+    return result
 
 
 async def runtime_supports_bff_tools(
@@ -140,7 +160,7 @@ class StudioToolRun:
         receive_message: Callable[[], Coroutine[Any, Any, dict[str, Any]]],
         send_message: Callable[[dict[str, Any]], Awaitable[None]],
         close_transport: Callable[[], Awaitable[None]],
-        registry: StudioToolRegistry,
+        catalog: StudioToolCatalogSnapshot,
         scope_id: str,
         catalog_revision: str,
         run_id: str,
@@ -148,7 +168,7 @@ class StudioToolRun:
         self._receive_message = receive_message
         self._send_message = send_message
         self._close_transport = close_transport
-        self.registry = registry
+        self.catalog = catalog
         self.scope_id = scope_id
         self.catalog_revision = catalog_revision
         self.run_id = run_id
@@ -203,12 +223,12 @@ class StudioToolRun:
                 raise StudioToolExecutionError(
                     "Studio tool arguments must be an object."
                 )
-            content = await self.registry.execute(
+            content = await self.catalog.execute(
                 name=str(message.get("tool_name") or ""),
                 executor_revision=str(message.get("executor_revision") or ""),
                 arguments=arguments,
             )
-            json.dumps(content, ensure_ascii=False)
+            content = _bounded_tool_result(content)
         except StudioToolExecutionError as exc:
             status = "denied"
             error = str(exc)
@@ -331,7 +351,7 @@ async def _open_http_studio_tool_run(
     endpoint: str,
     headers: dict[str, str],
     payload: dict[str, Any],
-    registry: StudioToolRegistry,
+    catalog: StudioToolCatalogSnapshot,
     scope_id: str,
     revision: str,
     run_id: str,
@@ -357,7 +377,7 @@ async def _open_http_studio_tool_run(
                 "studio_instance_id": studio_instance_id,
                 "scope_id": scope_id,
                 "catalog_revision": revision,
-                "tools": registry.manifests(),
+                "tools": catalog.manifests(),
                 "request_id": request_id,
                 "run_id": run_id,
                 "payload": payload,
@@ -431,7 +451,7 @@ async def _open_http_studio_tool_run(
             receive_message=receive_message,
             send_message=send_message,
             close_transport=close_transport,
-            registry=registry,
+            catalog=catalog,
             scope_id=scope_id,
             catalog_revision=revision,
             run_id=run_id,
@@ -449,12 +469,12 @@ async def open_studio_tool_run(
     authorization: str,
     runtime_id: str,
     payload: dict[str, Any],
-    registry: StudioToolRegistry,
+    catalog: StudioToolCatalogSnapshot,
 ) -> StudioToolRun:
     """Connect, publish the current catalog, and start one same-socket run."""
 
-    if not registry.enabled:
-        raise StudioChannelError("Studio tool registry is empty.")
+    if not catalog.enabled:
+        raise StudioChannelError("Studio tool catalog is empty.")
     headers: dict[str, str] = {}
     if authorization:
         headers["Authorization"] = authorization
@@ -466,7 +486,7 @@ async def open_studio_tool_run(
     if not studio_instance_id:
         studio_instance_id = f"studio-{os.getpid()}"
     scope_id = _scope_id(runtime_id, payload)
-    revision = registry.revision
+    revision = catalog.revision
     run_id = str(payload.get("invocation_id") or uuid4())
     try:
         websocket = await connect(
@@ -490,7 +510,7 @@ async def open_studio_tool_run(
             endpoint=endpoint,
             headers=headers,
             payload=payload,
-            registry=registry,
+            catalog=catalog,
             scope_id=scope_id,
             revision=revision,
             run_id=run_id,
@@ -527,7 +547,7 @@ async def open_studio_tool_run(
                     "type": "catalog.replace",
                     "scope_id": scope_id,
                     "revision": revision,
-                    "tools": registry.manifests(),
+                    "tools": catalog.manifests(),
                 },
                 ensure_ascii=False,
             )
@@ -559,7 +579,7 @@ async def open_studio_tool_run(
             receive_message=receive_message,
             send_message=send_message,
             close_transport=websocket.close,
-            registry=registry,
+            catalog=catalog,
             scope_id=scope_id,
             catalog_revision=revision,
             run_id=run_id,

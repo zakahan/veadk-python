@@ -145,6 +145,22 @@ def _registry() -> StudioToolRegistry:
     return registry
 
 
+def test_large_tool_results_are_bounded_before_crossing_the_channel() -> None:
+    content = {
+        "ok": True,
+        "executed_by": "studio-bff",
+        "data": "x" * connector.MAX_TOOL_RESULT_BYTES,
+    }
+
+    result = connector._bounded_tool_result(content)
+
+    assert result["ok"] is True
+    assert result["executed_by"] == "studio-bff"
+    assert result["truncated"] is True
+    assert result["original_size_bytes"] > connector.MAX_TOOL_RESULT_BYTES
+    assert len(result["preview"].encode("utf-8")) <= connector.TOOL_RESULT_PREVIEW_BYTES
+
+
 @pytest.mark.asyncio
 async def test_connector_reads_agent_bff_tool_capability(
     monkeypatch: pytest.MonkeyPatch,
@@ -242,7 +258,7 @@ async def test_connector_runs_and_executes_tool_over_one_websocket(
             "session_id": "session-1",
             "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
         },
-        registry=_registry(),
+        catalog=_registry().snapshot(),
     )
 
     chunks = [chunk async for chunk in run.stream()]
@@ -286,7 +302,7 @@ async def test_connector_does_not_execute_a_cross_scope_tool_call(
             "session_id": "session-1",
             "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
         },
-        registry=_registry(),
+        catalog=_registry().snapshot(),
     )
 
     chunks = [chunk async for chunk in run.stream()]
@@ -340,7 +356,7 @@ async def test_connector_falls_back_to_http_and_completes_a_tool_call(
                 "session_id": "session-1",
                 "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
             },
-            registry=_registry(),
+            catalog=_registry().snapshot(),
         )
         chunks = [chunk async for chunk in run.stream()]
     finally:

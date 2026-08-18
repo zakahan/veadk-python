@@ -38,7 +38,7 @@ def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "demo")
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
     app = _create_frontend_app(monkeypatch, tmp_path)
 
     class _FakeRuntimeClient:
@@ -115,10 +115,237 @@ def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
     assert opened["endpoint"] == "https://runtime.example"
     assert opened["authorization"] == "Bearer runtime-api-key"
     assert opened["runtime_id"] == "runtime-1"
-    assert {item["name"] for item in opened["registry"].manifests()} == {
-        "studio_current_time",
-        "studio_multiply",
+    assert {item["name"] for item in opened["catalog"].manifests()} == {
+        "studio_get_codebase_mr_status",
+        "studio_query_logs_by_logid",
+        "studio_read_lark_doc",
     }
+
+
+def test_runtime_proxy_builds_a_per_run_selected_tool_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    opened: dict[str, Any] = {}
+
+    class _FakeStudioRun:
+        async def stream(self):
+            yield b'data: {"id":"selected-run"}\n\n'
+
+    async def fake_open_studio_tool_run(**kwargs: Any) -> _FakeStudioRun:
+        opened.update(kwargs)
+        return _FakeStudioRun()
+
+    async def fake_runtime_supports_bff_tools(**kwargs: Any) -> bool:
+        del kwargs
+        return True
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.open_studio_tool_run",
+        fake_open_studio_tool_run,
+    )
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        fake_runtime_supports_bff_tools,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
+                "platform_tools": ["studio_read_lark_doc"],
+            },
+        )
+
+    assert response.status_code == 200
+    assert [item["name"] for item in opened["catalog"].manifests()] == [
+        "studio_read_lark_doc"
+    ]
+    assert "platform_tools" not in opened["payload"]
+
+
+def test_runtime_tool_capabilities_expose_safe_local_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    async def fake_runtime_supports_bff_tools(**kwargs: Any) -> bool:
+        assert kwargs == {
+            "endpoint": "https://runtime.example",
+            "authorization": "Bearer runtime-api-key",
+        }
+        return True
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        fake_runtime_supports_bff_tools,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/web/runtime-tool-channel/runtime-1/capabilities?region=cn-beijing"
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["supported"] is True
+    assert {item["id"] for item in body["tools"]} == {
+        "studio_get_codebase_mr_status",
+        "studio_query_logs_by_logid",
+        "studio_read_lark_doc",
+    }
+    assert all("input_schema" not in item for item in body["tools"])
+
+
+def test_empty_platform_tool_selection_uses_plain_run_without_forwarding_control(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+
+    async def unexpected_capability_query(**kwargs: Any) -> bool:
+        del kwargs
+        raise AssertionError("an empty selection must not open the Tool Channel")
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        unexpected_capability_query,
+    )
+    forwarded: dict[str, Any] = {}
+
+    class _FakeUpstreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_raw(self):
+            yield b'data: {"id":"plain-empty-selection"}\n\n'
+
+        async def aclose(self) -> None:
+            pass
+
+    class _FakeHttpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def build_request(self, *args: Any, **kwargs: Any) -> object:
+            del args
+            forwarded.update(json.loads(kwargs["content"]))
+            return object()
+
+        async def send(self, request: object, *, stream: bool) -> _FakeUpstreamResponse:
+            del request
+            assert stream
+            return _FakeUpstreamResponse()
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeHttpClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {"role": "user", "parts": [{"text": "hello"}]},
+                "platform_tools": [],
+            },
+        )
+
+    assert response.status_code == 200
+    assert "plain-empty-selection" in response.text
+    assert "platform_tools" not in forwarded
 
 
 def test_runtime_route_channel_connects_after_runtime_probe(
@@ -195,7 +422,7 @@ def test_runtime_proxy_uses_plain_run_sse_when_agent_disables_bff_tools(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "demo")
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
     app = _create_frontend_app(monkeypatch, tmp_path)
 
     class _FakeRuntimeClient:

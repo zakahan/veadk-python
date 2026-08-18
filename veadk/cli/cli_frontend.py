@@ -6020,6 +6020,54 @@ def _run_frontend_server(
             dict(request.headers), apikey, validated_authorization
         )
 
+    @app.get("/web/runtime-tool-channel/{runtime_id}/capabilities")
+    async def _runtime_tool_channel_capabilities(runtime_id: str, request: Request):
+        """Return local BFF tools and whether this Runtime accepts them."""
+
+        region = _coerce_cloud_region(request.query_params.get("region"))
+        try:
+            runtime = _authorized_runtime(
+                request,
+                runtime_id,
+                region,
+                coded_access_error=True,
+            )
+            endpoint, apikey, auth_type, _ = _resolve_runtime_conn(
+                runtime_id,
+                region,
+                runtime,
+            )
+            headers = _runtime_request_headers(
+                request,
+                apikey=apikey,
+                auth_type=auth_type,
+            )
+            supported = False
+            if studio_tool_registry.enabled:
+                from frontend.server.studio_tools import runtime_supports_bff_tools
+
+                supported = await runtime_supports_bff_tools(
+                    endpoint=endpoint,
+                    authorization=headers.get("Authorization", ""),
+                )
+        except HTTPException:
+            raise
+        except Exception as error:  # noqa: BLE001 - capability boundary
+            logger.exception(
+                "Studio tool capability query failed runtime_id=%s region=%s",
+                runtime_id,
+                region,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="studio_tool_capability_query_error",
+            ) from error
+        return {
+            "enabled": studio_tool_registry.enabled,
+            "supported": supported,
+            "tools": studio_tool_registry.public_items(),
+        }
+
     @app.post("/web/runtime-route-channel/{runtime_id}/connect")
     async def _connect_runtime_route_channel(runtime_id: str, request: Request):
         """Ensure the local BFF is the active dynamic-route provider."""
@@ -6231,6 +6279,7 @@ def _run_frontend_server(
         run_sse_activity: RunSseActivity | None = None
         run_sse_principal: StudioPrincipal | None = None
         run_sse_payload: dict[str, Any] | None = None
+        studio_tool_catalog: Any | None = None
         usage_invocation_id = ""
         if request.method == "POST" and path in {"run_sse", "harness/run_sse"}:
             try:
@@ -6243,6 +6292,22 @@ def _run_frontend_server(
                 raise HTTPException(
                     status_code=400, detail="run_sse request body must be an object"
                 )
+            selected_tool_ids: list[str] | None = None
+            if "platform_tools" in payload:
+                raw_tool_ids = payload.pop("platform_tools")
+                if not isinstance(raw_tool_ids, list) or any(
+                    not isinstance(tool_id, str) or not tool_id.strip()
+                    for tool_id in raw_tool_ids
+                ):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="platform_tools must be a list of non-empty tool IDs",
+                    )
+                selected_tool_ids = [tool_id.strip() for tool_id in raw_tool_ids]
+            try:
+                studio_tool_catalog = studio_tool_registry.snapshot(selected_tool_ids)
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
             try:
                 payload = await resolve_runtime_media(payload, media_service)
                 run_sse_payload = payload
@@ -6316,7 +6381,8 @@ def _run_frontend_server(
                 )
 
         if (
-            studio_tool_registry.enabled
+            studio_tool_catalog is not None
+            and studio_tool_catalog.enabled
             and run_sse_payload is not None
             and request.method == "POST"
             and path in {"run_sse", "harness/run_sse"}
@@ -6338,7 +6404,7 @@ def _run_frontend_server(
                         authorization=headers.get("Authorization", ""),
                         runtime_id=runtime_id,
                         payload=run_sse_payload,
-                        registry=studio_tool_registry,
+                        catalog=studio_tool_catalog,
                     )
                     if bff_tools_enabled
                     else None
