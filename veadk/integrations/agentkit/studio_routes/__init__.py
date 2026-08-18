@@ -12,26 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Studio BFF-owned dynamic tools and the Runtime WebSocket bridge."""
+"""Runtime host for Studio BFF-owned dynamic HTTP routes."""
 
-from frontend.server.studio_tools.connector import (
-    StudioChannelError,
-    StudioToolRun,
-    open_studio_tool_run,
-    runtime_supports_bff_tools,
+from veadk.integrations.agentkit.studio_routes.host import (
+    StudioDynamicRouteMiddleware,
+    StudioRouteHost,
+    mount_studio_route_host,
 )
-from frontend.server.studio_tools.registry import (
-    StudioTool,
-    StudioToolRegistry,
-    build_studio_tool_registry,
+from veadk.integrations.agentkit.studio_routes.protocol import (
+    ROUTE_PROTOCOL_VERSION,
+    RouteCatalogSnapshot,
+    StudioRouteManifest,
+    route_catalog_revision,
 )
 
 __all__ = [
-    "StudioChannelError",
-    "StudioTool",
-    "StudioToolRegistry",
-    "StudioToolRun",
-    "build_studio_tool_registry",
-    "open_studio_tool_run",
-    "runtime_supports_bff_tools",
+    "ROUTE_PROTOCOL_VERSION",
+    "RouteCatalogSnapshot",
+    "StudioDynamicRouteMiddleware",
+    "StudioRouteHost",
+    "StudioRouteManifest",
+    "mount_studio_route_host",
+    "route_catalog_revision",
 ]

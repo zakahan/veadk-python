@@ -32,6 +32,7 @@ from google.adk.tools.base_tool import BaseTool
 from pydantic import ValidationError
 
 from veadk.integrations.agentkit.studio_channel.protocol import (
+    CAPABILITIES_SUFFIX,
     DEFAULT_CHANNEL_PATH,
     HTTP_MESSAGE_SUFFIX,
     HTTP_RUN_SUFFIX,
@@ -309,8 +310,34 @@ def mount_studio_channel_routes(
     run_handler: StudioChannelRunHandler,
     reserved_tool_names: set[str] | None = None,
     path: str = DEFAULT_CHANNEL_PATH,
+    enabled: bool = True,
 ) -> None:
-    """Mount the Runtime endpoint used by an outbound Studio BFF connection."""
+    """Advertise BFF-tool support and mount RPC routes when explicitly enabled."""
+
+    def _promote_endpoints(*endpoints: Callable[..., Any]) -> None:
+        # AgentKit's generated app contains broad fallback routes before
+        # integration routes. Starlette matches in declaration order.
+        for endpoint in reversed(endpoints):
+            route = next(
+                item
+                for item in app.router.routes
+                if getattr(item, "endpoint", None) is endpoint
+            )
+            app.router.routes.remove(route)
+            app.router.routes.insert(0, route)
+
+    @app.get(f"{path}{CAPABILITIES_SUFFIX}")
+    async def studio_tool_channel_capabilities() -> dict[str, Any]:
+        return {
+            "enabled": enabled,
+            "protocol": PROTOCOL_VERSION,
+            "transports": ["websocket", "http-sse"] if enabled else [],
+        }
+
+    _promote_endpoints(studio_tool_channel_capabilities)
+    setattr(app.state, "_veadk_studio_channel_enabled", enabled)
+    if not enabled:
+        return
 
     reserved = set(reserved_tool_names or ())
     http_connections: dict[str, _StudioChannelConnection] = {}
@@ -490,18 +517,10 @@ def mount_studio_channel_routes(
             await connection.handle_message(message)
         return {"accepted": True}
 
-    # AgentKit's generated app contains broad fallback routes before integration
-    # routes are mounted. Starlette matches in declaration order, so promote the
-    # channel endpoints or the fallback returns its own 404/HTML response first.
-    for endpoint in reversed(
-        (studio_tool_channel, studio_tool_http_run, studio_tool_http_message)
-    ):
-        route = next(
-            item
-            for item in app.router.routes
-            if getattr(item, "endpoint", None) is endpoint
-        )
-        app.router.routes.remove(route)
-        app.router.routes.insert(0, route)
+    _promote_endpoints(
+        studio_tool_channel,
+        studio_tool_http_run,
+        studio_tool_http_message,
+    )
 
     setattr(app.state, "_veadk_studio_channel_mounted", True)

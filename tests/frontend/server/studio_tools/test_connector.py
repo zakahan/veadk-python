@@ -146,6 +146,80 @@ def _registry() -> StudioToolRegistry:
 
 
 @pytest.mark.asyncio
+async def test_connector_reads_agent_bff_tool_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    class _Response:
+        status_code = 200
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "enabled": True,
+                "protocol": "studio-tool-channel/1",
+                "transports": ["websocket", "http-sse"],
+            }
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            del args
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> _Response:
+            requests.append((url, headers))
+            return _Response()
+
+    monkeypatch.setattr(connector.httpx, "AsyncClient", _Client)
+
+    assert await connector.runtime_supports_bff_tools(
+        endpoint="https://runtime.example/base?gateway=value",
+        authorization="Bearer runtime-key",
+    )
+    assert requests == [
+        (
+            "https://runtime.example/base/harness/studio-channel/v1/capabilities"
+            "?gateway=value",
+            {"Authorization": "Bearer runtime-key"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_connector_treats_missing_capability_as_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Response:
+        status_code = 404
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            del args
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> _Response:
+            del url, headers
+            return _Response()
+
+    monkeypatch.setattr(connector.httpx, "AsyncClient", _Client)
+
+    assert not await connector.runtime_supports_bff_tools(
+        endpoint="https://runtime.example",
+        authorization="",
+    )
+
+
+@pytest.mark.asyncio
 async def test_connector_runs_and_executes_tool_over_one_websocket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

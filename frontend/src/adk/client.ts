@@ -2880,6 +2880,34 @@ export async function probeRuntimeApps(
   }
 }
 
+export interface RuntimeRouteChannelStatus {
+  enabled: boolean;
+  supported: boolean;
+  connected: boolean;
+  catalogRevision: string | null;
+}
+
+/** Ask the local Studio BFF to keep a persistent reverse-route channel to the
+ *  Runtime. A Runtime without the generic route host is a supported no-op. */
+export async function ensureRuntimeRouteChannel(
+  runtimeId: string,
+  region: string,
+): Promise<RuntimeRouteChannelStatus> {
+  const params = new URLSearchParams({ region });
+  const res = await apiFetch(
+    `/web/runtime-route-channel/${encodeURIComponent(runtimeId)}/connect?${params.toString()}`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    throw new RuntimeProbeError(
+      await httpErrorMessage(res, "连接 Studio 动态路由失败"),
+      false,
+      true,
+    );
+  }
+  return (await res.json()) as RuntimeRouteChannelStatus;
+}
+
 export interface RuntimeA2aIntegration {
   name: string;
   description: string;

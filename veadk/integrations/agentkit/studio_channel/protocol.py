@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PROTOCOL_VERSION = "studio-tool-channel/1"
 DEFAULT_CHANNEL_PATH = "/harness/studio-channel/v1"
+CAPABILITIES_SUFFIX = "/capabilities"
 HTTP_RUN_SUFFIX = "/http-runs"
 HTTP_MESSAGE_SUFFIX = "/http-channels/{channel_id}/messages"
 MAX_TOOLS = 64

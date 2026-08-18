@@ -247,3 +247,53 @@ def test_channel_routes_are_promoted_above_an_existing_catchall() -> None:
 
     assert response.status_code == 400
     assert response.json() == {"detail": "unsupported protocol"}
+
+
+def test_channel_capability_can_be_advertised_without_enabling_rpc_routes() -> None:
+    app = FastAPI()
+
+    async def run_handler(
+        payload: dict[str, Any], tools: list[BaseTool]
+    ) -> AsyncIterator[dict[str, Any]]:
+        del payload, tools
+        if False:
+            yield {}
+
+    mount_studio_channel_routes(
+        app=app,
+        run_handler=run_handler,
+        enabled=False,
+    )
+    client = TestClient(app)
+
+    assert client.get("/harness/studio-channel/v1/capabilities").json() == {
+        "enabled": False,
+        "protocol": PROTOCOL_VERSION,
+        "transports": [],
+    }
+    assert (
+        client.post(
+            "/harness/studio-channel/v1/http-runs",
+            json={"protocol": PROTOCOL_VERSION},
+        ).status_code
+        == 404
+    )
+
+
+def test_channel_capability_advertises_supported_transports_when_enabled() -> None:
+    app = FastAPI()
+
+    async def run_handler(
+        payload: dict[str, Any], tools: list[BaseTool]
+    ) -> AsyncIterator[dict[str, Any]]:
+        del payload, tools
+        if False:
+            yield {}
+
+    mount_studio_channel_routes(app=app, run_handler=run_handler, enabled=True)
+
+    assert TestClient(app).get("/harness/studio-channel/v1/capabilities").json() == {
+        "enabled": True,
+        "protocol": PROTOCOL_VERSION,
+        "transports": ["websocket", "http-sse"],
+    }

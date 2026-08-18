@@ -20,7 +20,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -34,6 +34,7 @@ from frontend.server.studio_tools.registry import (
     StudioToolRegistry,
 )
 from veadk.integrations.agentkit.studio_channel.protocol import (
+    CAPABILITIES_SUFFIX,
     DEFAULT_CHANNEL_PATH,
     HTTP_MESSAGE_SUFFIX,
     HTTP_RUN_SUFFIX,
@@ -46,6 +47,58 @@ logger = get_logger(__name__)
 
 class StudioChannelError(RuntimeError):
     """A connection or protocol failure safe to surface to Studio."""
+
+
+async def runtime_supports_bff_tools(
+    *,
+    endpoint: str,
+    authorization: str,
+) -> bool:
+    """Return whether the deployed Agent explicitly accepts BFF tools."""
+
+    headers = {"Authorization": authorization} if authorization else {}
+    url = _http_channel_url(endpoint, CAPABILITIES_SUFFIX)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
+            response = await client.get(url, headers=headers)
+    except (httpx.ConnectError, httpx.TimeoutException) as error:
+        raise StudioChannelError(
+            "Unable to query the Runtime BFF-tool capability."
+        ) from error
+    if response.status_code == 404:
+        return False
+    if response.status_code >= 400:
+        raise StudioChannelError(
+            "Runtime rejected the BFF-tool capability query "
+            f"(HTTP {response.status_code})."
+        )
+    try:
+        capability = response.json()
+    except ValueError as error:
+        raise StudioChannelError(
+            "Runtime returned an invalid BFF-tool capability response."
+        ) from error
+    if not isinstance(capability, dict) or not isinstance(
+        capability.get("enabled"), bool
+    ):
+        raise StudioChannelError(
+            "Runtime returned an invalid BFF-tool capability response."
+        )
+    if not capability["enabled"]:
+        return False
+    if capability.get("protocol") != PROTOCOL_VERSION:
+        raise StudioChannelError(
+            "Runtime advertises an incompatible BFF-tool protocol."
+        )
+    transports = capability.get("transports")
+    if not isinstance(transports, list) or not {
+        "websocket",
+        "http-sse",
+    }.intersection(transports):
+        raise StudioChannelError(
+            "Runtime enabled BFF tools without a supported transport."
+        )
+    return True
 
 
 def _websocket_url(endpoint: str) -> str:
@@ -84,7 +137,7 @@ class StudioToolRun:
     def __init__(
         self,
         *,
-        receive_message: Callable[[], Awaitable[dict[str, Any]]],
+        receive_message: Callable[[], Coroutine[Any, Any, dict[str, Any]]],
         send_message: Callable[[dict[str, Any]], Awaitable[None]],
         close_transport: Callable[[], Awaitable[None]],
         registry: StudioToolRegistry,
@@ -254,7 +307,8 @@ class StudioToolRun:
 
 
 async def _receive_expected_message(
-    receive_message: Callable[[], Awaitable[dict[str, Any]]], expected_type: str
+    receive_message: Callable[[], Coroutine[Any, Any, dict[str, Any]]],
+    expected_type: str,
 ) -> dict[str, Any]:
     message = await asyncio.wait_for(receive_message(), timeout=15)
     if not isinstance(message, dict) or message.get("type") != expected_type:

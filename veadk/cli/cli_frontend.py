@@ -1302,6 +1302,12 @@ def _run_frontend_server(
         web=False,  # we serve our own UI, not the bundled ADK dev UI
     )
 
+    from contextlib import asynccontextmanager
+
+    from frontend.server.studio_routes import (
+        StudioRouteChannelManager,
+        build_studio_route_registry,
+    )
     from frontend.server.studio_tools import build_studio_tool_registry
 
     studio_tool_registry = build_studio_tool_registry()
@@ -1312,6 +1318,32 @@ def _run_frontend_server(
             [item["name"] for item in studio_tool_registry.manifests()],
             studio_tool_registry.revision,
         )
+
+    studio_route_registry = build_studio_route_registry()
+    studio_route_channels = StudioRouteChannelManager(studio_route_registry)
+    app.state.studio_route_registry = studio_route_registry
+    app.state.studio_route_channels = studio_route_channels
+    if studio_route_registry.enabled:
+        logger.info(
+            "Studio reverse route channel enabled routes=%s revision=%s",
+            [
+                f"{item['method']} {item['path']}"
+                for item in studio_route_registry.manifests()
+            ],
+            studio_route_registry.revision,
+        )
+
+    route_channel_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def _studio_route_channel_lifespan(current_app: Any):
+        async with route_channel_lifespan(current_app):
+            try:
+                yield
+            finally:
+                await studio_route_channels.close()
+
+    app.router.lifespan_context = _studio_route_channel_lifespan
 
     # Studio's production bundle includes large CSS assets. Compress them at
     # the application boundary so cloud API gateways do not have to stream the
@@ -5988,11 +6020,60 @@ def _run_frontend_server(
             dict(request.headers), apikey, validated_authorization
         )
 
+    @app.post("/web/runtime-route-channel/{runtime_id}/connect")
+    async def _connect_runtime_route_channel(runtime_id: str, request: Request):
+        """Ensure the local BFF is the active dynamic-route provider."""
+
+        region = _coerce_cloud_region(request.query_params.get("region"))
+        try:
+            runtime = _authorized_runtime(
+                request,
+                runtime_id,
+                region,
+                coded_access_error=True,
+            )
+            endpoint, apikey, auth_type, _ = _resolve_runtime_conn(
+                runtime_id,
+                region,
+                runtime,
+            )
+            headers = _runtime_request_headers(
+                request,
+                apikey=apikey,
+                auth_type=auth_type,
+            )
+            supported = await studio_route_channels.ensure_connected(
+                runtime_id=runtime_id,
+                endpoint=endpoint,
+                authorization=headers.get("Authorization", ""),
+            )
+        except HTTPException:
+            raise
+        except Exception as error:  # noqa: BLE001 - reverse-channel boundary
+            logger.exception(
+                "Studio route channel connection failed runtime_id=%s region=%s",
+                runtime_id,
+                region,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="studio_route_channel_connect_error",
+            ) from error
+        return {
+            "enabled": studio_route_registry.enabled,
+            "supported": supported,
+            "connected": supported and studio_route_channels.connected(runtime_id),
+            "catalogRevision": (
+                studio_route_registry.revision
+                if studio_route_registry.enabled
+                else None
+            ),
+        }
+
     evaluation_automation: EvaluationAutomationService | None = None
     agent_usage_service: Any | None = None
     if studio:
         from contextlib import asynccontextmanager, suppress
-
         from frontend.server.agent_usage import (
             create_service as create_agent_usage_service,
         )
@@ -6243,15 +6324,24 @@ def _run_frontend_server(
             from frontend.server.studio_tools import (
                 StudioChannelError,
                 open_studio_tool_run,
+                runtime_supports_bff_tools,
             )
 
             try:
-                studio_run = await open_studio_tool_run(
+                bff_tools_enabled = await runtime_supports_bff_tools(
                     endpoint=endpoint,
                     authorization=headers.get("Authorization", ""),
-                    runtime_id=runtime_id,
-                    payload=run_sse_payload,
-                    registry=studio_tool_registry,
+                )
+                studio_run = (
+                    await open_studio_tool_run(
+                        endpoint=endpoint,
+                        authorization=headers.get("Authorization", ""),
+                        runtime_id=runtime_id,
+                        payload=run_sse_payload,
+                        registry=studio_tool_registry,
+                    )
+                    if bff_tools_enabled
+                    else None
                 )
             except StudioChannelError as error:
                 logger.warning(
@@ -6277,36 +6367,47 @@ def _run_frontend_server(
                     detail="studio_tool_channel_connect_error",
                 ) from error
 
-            async def _studio_channel_body():
-                source = studio_run.stream()
-                try:
-                    if observation is None:
-                        async for chunk in source:
-                            yield chunk
-                    else:
-                        async for chunk in observed_sse_stream(
-                            source,
-                            observation,
-                            _run_sse_completed,
-                        ):
-                            yield chunk
-                except StudioChannelError as error:
-                    logger.warning(
-                        "Studio tool channel stream failed runtime_id=%s error=%s",
-                        runtime_id,
-                        error,
-                    )
-                    yield (
-                        "data: "
-                        + json.dumps({"error": f"Studio tool channel failed: {error}"})
-                        + "\n\n"
-                    ).encode("utf-8")
+            if studio_run is None:
+                logger.info(
+                    "runtime Agent has BFF tools disabled; using plain run_sse "
+                    "runtime_id=%s target_host=%s",
+                    runtime_id,
+                    target_host,
+                )
+            else:
 
-            return StreamingResponse(
-                _studio_channel_body(),
-                status_code=200,
-                media_type="text/event-stream",
-            )
+                async def _studio_channel_body():
+                    source = studio_run.stream()
+                    try:
+                        if observation is None:
+                            async for chunk in source:
+                                yield chunk
+                        else:
+                            async for chunk in observed_sse_stream(
+                                source,
+                                observation,
+                                _run_sse_completed,
+                            ):
+                                yield chunk
+                    except StudioChannelError as error:
+                        logger.warning(
+                            "Studio tool channel stream failed runtime_id=%s error=%s",
+                            runtime_id,
+                            error,
+                        )
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {"error": f"Studio tool channel failed: {error}"}
+                            )
+                            + "\n\n"
+                        ).encode("utf-8")
+
+                return StreamingResponse(
+                    _studio_channel_body(),
+                    status_code=200,
+                    media_type="text/event-stream",
+                )
 
         is_retryable_read = _runtime_proxy_is_retryable_read(upstream_method)
         max_attempts = _runtime_proxy_attempts(

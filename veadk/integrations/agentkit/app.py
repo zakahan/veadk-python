@@ -989,6 +989,7 @@ def _configure_session_capability_routes(
     mount_studio_channel_routes(
         app=app,
         run_handler=_studio_channel_run,
+        enabled=bool(getattr(root_agent, "enable_bff_tools", False)),
         reserved_tool_names={
             _tool_label(tool) for tool in getattr(root_agent, "tools", None) or []
         },
@@ -1102,6 +1103,7 @@ def create_agentkit_app(
     *,
     agent_draft: Mapping[str, Any] | None = None,
     enable_feishu: bool = False,
+    enable_studio_routes: bool = False,
     identity: RuntimeIdentity | None = None,
 ) -> FastAPI:
     """Create an AgentKit-compatible FastAPI app for ``root_agent``.
@@ -1116,6 +1118,9 @@ def create_agentkit_app(
         agent_draft: Optional sanitized builder draft for read-only editing metadata.
         enable_feishu: Whether to start the Feishu channel with credentials from
             ``FEISHU_APP_ID`` and ``FEISHU_APP_SECRET``.
+        enable_studio_routes: Whether to mount the generic Runtime host for
+            Studio BFF-owned dynamic HTTP routes. Route handlers remain in the
+            Studio BFF and are never loaded into the Runtime process.
         identity: Optional AgentKit Runtime identity boundary. When supplied,
             AgentKit verifies and binds the inbound user identity before VeADK
             Agent or Tool code runs.
@@ -1150,6 +1155,9 @@ def create_agentkit_app(
     _add_introspection_routes(app, root_agent, names, agent_draft)
     _mount_webui(app)
     _prioritize_platform_routes(app)
+    from veadk.integrations.agentkit.studio_routes import mount_studio_route_host
+
+    mount_studio_route_host(app=app, enabled=enable_studio_routes)
     return app
 
 

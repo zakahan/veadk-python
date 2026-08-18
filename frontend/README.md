@@ -250,6 +250,12 @@ Runtime sees ordinary tools, but receives neither the executor implementation no
 its credentials. The HTTP fallback currently requires exactly one Runtime
 instance so its stream and result posts reach the same process.
 
+The deployed Agent must explicitly opt in with `enable_bff_tools=True`. The
+default is `False`; in that case Studio queries the Runtime capability endpoint
+and keeps the original `run_sse` path without publishing a BFF catalog. Opting in
+enables dynamic injection but doesn't define or persist any concrete BFF tool on
+the Agent.
+
 Set `VEADK_STUDIO_TOOL_CHANNEL=demo` to enable the two built-in verification
 tools. Set `VEADK_STUDIO_TOOL_MODULE` to an importable module that exports
 `register_tools(registry)` to add BFF tools; Studio rebuilds the registry at
@@ -260,6 +266,23 @@ forwarded during the WebSocket handshake.
 
 A deployable Runtime agent, custom BFF tool, and launch scripts live in the
 [local reverse-tool example](../.agents/local/studio/A_BFF_tool_for_runtime/examples/README.md).
+
+## Studio BFF dynamic routes
+
+A compatible Runtime can also expose Studio-owned HTTP routes without loading
+their Python handlers. Build the Runtime app with
+`create_agentkit_app(..., enable_studio_routes=True)` and start Studio with
+`VEADK_STUDIO_ROUTE_CHANNEL=demo`. After Studio connects the Runtime, the BFF
+keeps a separate persistent reverse-route channel and publishes the exact route
+catalog. The built-in verification route is `GET /print_hello`.
+
+Requests still enter through the Runtime URL. Its dynamic dispatcher emits
+`route.call`, the local BFF executes the handler, and `route.result` becomes the
+Runtime HTTP response. WSS is preferred; unsupported gateways automatically use
+a long-lived HTTP/SSE downlink plus HTTP result posts. The current implementation
+is a single-instance demo: both the persistent stream and arbitrary route
+requests must reach the same Runtime process. A disconnected BFF leaves the
+known route unavailable with HTTP 503.
 
 Local Studio reads transient and snapshot Tool IDs from
 `SANDBOX_CHAT_CODEX`/`SANDBOX_CHAT_CODEX_SNAPSHOT`,

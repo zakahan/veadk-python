@@ -82,6 +82,16 @@ def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
         fake_open_studio_tool_run,
     )
 
+    async def fake_runtime_supports_bff_tools(**kwargs: Any) -> bool:
+        assert kwargs["endpoint"] == "https://runtime.example"
+        assert kwargs["authorization"] == "Bearer runtime-api-key"
+        return True
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        fake_runtime_supports_bff_tools,
+    )
+
     class _UnexpectedHttpClient:
         def __init__(self, **kwargs: Any) -> None:
             del kwargs
@@ -109,6 +119,170 @@ def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
         "studio_current_time",
         "studio_multiply",
     }
+
+
+def test_runtime_route_channel_connects_after_runtime_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("VEADK_STUDIO_ROUTE_CHANNEL", "demo")
+    connected: dict[str, Any] = {}
+
+    class _FakeRouteChannelManager:
+        def __init__(self, registry: Any) -> None:
+            self.registry = registry
+
+        async def ensure_connected(self, **kwargs: Any) -> bool:
+            connected.update(kwargs)
+            return True
+
+        def connected(self, runtime_id: str) -> bool:
+            return runtime_id == "runtime-1"
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "frontend.server.studio_routes.StudioRouteChannelManager",
+        _FakeRouteChannelManager,
+    )
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-route-channel/runtime-1/connect?region=cn-beijing"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["connected"] is True
+    assert response.json()["supported"] is True
+    assert response.json()["catalogRevision"].startswith("sha256:")
+    assert connected == {
+        "runtime_id": "runtime-1",
+        "endpoint": "https://runtime.example",
+        "authorization": "Bearer runtime-api-key",
+    }
+
+
+def test_runtime_proxy_uses_plain_run_sse_when_agent_disables_bff_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "demo")
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                runtime_id="runtime-1",
+                project_name="default",
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example",
+                        network_type="public",
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+                tags=[],
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+
+    async def agent_disables_bff_tools(**kwargs: Any) -> bool:
+        del kwargs
+        return False
+
+    async def unexpected_channel(**kwargs: Any) -> None:
+        del kwargs
+        raise AssertionError("disabled Agent must not open the BFF tool channel")
+
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.runtime_supports_bff_tools",
+        agent_disables_bff_tools,
+    )
+    monkeypatch.setattr(
+        "frontend.server.studio_tools.open_studio_tool_run",
+        unexpected_channel,
+    )
+
+    class _FakeUpstreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def aiter_raw(self):
+            yield b'data: {"id":"plain-run"}\n\n'
+
+        async def aclose(self) -> None:
+            pass
+
+    class _FakeHttpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def build_request(self, *args: Any, **kwargs: Any) -> object:
+            del args, kwargs
+            return object()
+
+        async def send(self, request: object, *, stream: bool) -> _FakeUpstreamResponse:
+            del request
+            assert stream
+            return _FakeUpstreamResponse()
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeHttpClient)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
+            json={
+                "app_name": "agent",
+                "user_id": "user-1",
+                "session_id": "session-1",
+                "new_message": {"role": "user", "parts": [{"text": "hello"}]},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.text == 'data: {"id":"plain-run"}\n\n'
 
 
 def _create_frontend_app(
