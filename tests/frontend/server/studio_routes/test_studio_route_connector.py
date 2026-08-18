@@ -29,14 +29,30 @@ from websockets.exceptions import InvalidStatus
 
 import frontend.server.studio_routes.connector as connector
 from frontend.server.studio_routes.registry import build_studio_route_registry
+from frontend.server.studio_routes.skill_catalog import StudioSkillCatalog
 from veadk.integrations.agentkit.studio_routes import mount_studio_route_host
 
 
 @pytest.mark.asyncio
-async def test_http_fallback_executes_print_hello_in_studio_bff(
+async def test_http_fallback_executes_skill_catalog_in_studio_bff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_ROUTE_CHANNEL", "demo")
+    class FakeCatalog(StudioSkillCatalog):
+        async def search_findskill(
+            self,
+            *,
+            query: str,
+            page_number: int,
+            page_size: int,
+        ) -> dict[str, object]:
+            assert (query, page_number, page_size) == ("pdf", 1, 20)
+            return {
+                "items": [{"slug": "volcengine/example/pdf-reader"}],
+                "totalCount": 1,
+                "executedBy": "studio-bff",
+            }
+
+    monkeypatch.setenv("VEADK_STUDIO_ROUTE_CHANNEL", "skill-catalog")
     app = FastAPI()
     mount_studio_route_host(app=app, enabled=True)
     listener = socket.socket()
@@ -58,14 +74,16 @@ async def test_http_fallback_executes_print_hello_in_studio_bff(
         connector.serve_studio_route_channel(
             endpoint=f"http://127.0.0.1:{port}",
             authorization="",
-            registry=build_studio_route_registry(),
+            registry=build_studio_route_registry(skill_catalog=FakeCatalog()),
             on_ready=ready.set,
         )
     )
     try:
         await asyncio.wait_for(ready.wait(), timeout=5)
         async with httpx.AsyncClient() as client:
-            response = await client.get(f"http://127.0.0.1:{port}/print_hello")
+            response = await client.get(
+                f"http://127.0.0.1:{port}/harness/skills/findskill?query=pdf"
+            )
     finally:
         channel_task.cancel()
         await asyncio.gather(channel_task, return_exceptions=True)
@@ -73,9 +91,11 @@ async def test_http_fallback_executes_print_hello_in_studio_bff(
         await server_task
 
     assert response.status_code == 200
-    assert response.json()["message"] == "hello from Studio BFF"
-    assert response.json()["executed_by"] == "studio-bff"
-    assert isinstance(response.json()["bff_process_id"], int)
+    assert response.json() == {
+        "items": [{"slug": "volcengine/example/pdf-reader"}],
+        "totalCount": 1,
+        "executedBy": "studio-bff",
+    }
 
 
 @pytest.mark.asyncio

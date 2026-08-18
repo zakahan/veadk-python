@@ -42,7 +42,11 @@ test("opens the new-chat screen without a selected Agent", () => {
 test("keeps message actions disabled while leaving the Agent picker available", () => {
   assert.match(composerSource, /<NewChatAgentPicker/);
   assert.match(composerSource, /disabled=\{agentPickerDisabled\}/);
-  assert.match(composerSource, /disabled=\{disabled \|\| !allowAttachments\}/);
+  assert.match(
+    composerSource,
+    /const canOpenAddMenu = Boolean\(studioTools\) \|\| \(!disabled && allowAttachments\)/,
+  );
+  assert.match(composerSource, /disabled=\{!canOpenAddMenu\}/);
   assert.match(appSource, /agentPickerDisabled=\{!userId \|\| conversationBusy\}/);
   assert.match(
     appSource,

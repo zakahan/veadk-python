@@ -647,8 +647,9 @@ def mount_session_capability_routes(
     service: SessionCapabilityService | None = None,
     service_resolver: Callable[[str], Awaitable[SessionCapabilityService]]
     | None = None,
+    include_skill_catalog: bool = True,
 ) -> None:
-    """Mount the capability management API under the reserved harness prefix."""
+    """Mount capability APIs and, optionally, legacy Skill catalog queries."""
 
     if service is None and service_resolver is None:
         raise ValueError("service or service_resolver is required")
@@ -660,6 +661,7 @@ def mount_session_capability_routes(
         return await service_resolver(app_name)
 
     router = APIRouter(prefix="/harness")
+    catalog_router = APIRouter(prefix="/harness")
 
     @router.get("/capabilities/tools")
     async def list_tools() -> dict[str, list[dict[str, str]]]:
@@ -670,7 +672,7 @@ def mount_session_capability_routes(
             ]
         }
 
-    @router.get("/skills/spaces")
+    @catalog_router.get("/skills/spaces")
     async def list_skill_spaces(region: str = "all") -> dict[str, Any]:
         try:
             return await _list_skill_spaces(region)
@@ -685,7 +687,7 @@ def mount_session_capability_routes(
                 detail="暂时无法加载 Skill Space，请稍后重试。",
             ) from exc
 
-    @router.get("/skills/findskill")
+    @catalog_router.get("/skills/findskill")
     async def search_findskill(
         query: str = "",
         page_number: int = Query(default=1, ge=1),
@@ -703,7 +705,7 @@ def mount_session_capability_routes(
                 detail="暂时无法搜索 Skill Hub，请稍后重试。",
             ) from exc
 
-    @router.get("/skills/spaces/{space_id}/skills")
+    @catalog_router.get("/skills/spaces/{space_id}/skills")
     async def list_skills_in_space(
         space_id: str,
         region: str = "",
@@ -777,6 +779,8 @@ def mount_session_capability_routes(
             )
         )
 
+    if include_skill_catalog:
+        app.include_router(catalog_router)
     app.include_router(router)
 
 

@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-ROUTE_PROTOCOL_VERSION = "studio-route-channel/1"
+ROUTE_PROTOCOL_VERSION = "studio-route-channel/2"
 ROUTE_CONTROL_PATH = "/__studio/routes/v1"
 ROUTE_CAPABILITIES_PATH = f"{ROUTE_CONTROL_PATH}/capabilities"
 ROUTE_CHANNEL_PATH = f"{ROUTE_CONTROL_PATH}/channel"
@@ -49,11 +49,19 @@ RESERVED_ROUTE_PATHS = frozenset(
 )
 RESERVED_ROUTE_PREFIXES = (
     "/__studio",
-    "/harness",
     "/oauth2",
     "/assets",
     "/health",
 )
+STUDIO_SKILL_CATALOG_ROUTE_PATHS = frozenset(
+    {
+        "/harness/skills/findskill",
+        "/harness/skills/spaces",
+        "/harness/skills/spaces/{space_id}/skills",
+    }
+)
+_PATH_PARAMETER_SEGMENT = re.compile(r"^\{([A-Za-z_][A-Za-z0-9_]*)\}$")
+_REQUEST_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9._~-]{1,256}$")
 
 
 class StudioRouteManifest(BaseModel):
@@ -70,7 +78,7 @@ class StudioRouteManifest(BaseModel):
 
     @field_validator("path")
     @classmethod
-    def _validate_exact_path(cls, value: str) -> str:
+    def _validate_path(cls, value: str) -> str:
         if not value.startswith("/") or value.startswith("//"):
             raise ValueError("route path must start with exactly one slash")
         if value.endswith("/"):
@@ -79,12 +87,25 @@ class StudioRouteManifest(BaseModel):
             raise ValueError("route path must not contain query, fragment, or NUL")
         if ".." in value.split("/"):
             raise ValueError("route path must not contain parent traversal")
-        if (
-            "{" in value
-            or "}" in value
-            or not re.fullmatch(r"/[A-Za-z0-9._~/-]+", value)
-        ):
-            raise ValueError("only exact URL-safe route paths are supported")
+        if "{" in value or "}" in value:
+            if value not in STUDIO_SKILL_CATALOG_ROUTE_PATHS:
+                raise ValueError(
+                    "path parameters are limited to Studio Skill catalog routes"
+                )
+            parameter_names = []
+            for segment in value.removeprefix("/").split("/"):
+                if "{" not in segment and "}" not in segment:
+                    if not re.fullmatch(r"[A-Za-z0-9._~-]+", segment):
+                        raise ValueError("route path contains an invalid segment")
+                    continue
+                match = _PATH_PARAMETER_SEGMENT.fullmatch(segment)
+                if match is None:
+                    raise ValueError("route path parameters must occupy one segment")
+                parameter_names.append(match.group(1))
+            if len(parameter_names) != len(set(parameter_names)):
+                raise ValueError("route path contains duplicate parameter names")
+        elif not re.fullmatch(r"/[A-Za-z0-9._~/-]+", value):
+            raise ValueError("route path must be URL-safe")
         return value
 
 
@@ -148,9 +169,16 @@ def validate_route_catalog(
         raise ValueError(f"duplicate dynamic routes: {formatted}")
 
     for route in routes:
-        if route.path in RESERVED_ROUTE_PATHS or route.path.startswith(
+        if route.path in STUDIO_SKILL_CATALOG_ROUTE_PATHS and route.method != "GET":
+            raise ValueError(f"Studio Skill catalog route must use GET: {route.path}")
+        reserved = route.path in RESERVED_ROUTE_PATHS or route.path.startswith(
             RESERVED_ROUTE_PREFIXES
+        )
+        if route.path.startswith("/harness") and (
+            route.path not in STUDIO_SKILL_CATALOG_ROUTE_PATHS
         ):
+            reserved = True
+        if reserved:
             raise ValueError(f"reserved route path: {route.path}")
         if (route.method, route.path) in native_route_keys:
             raise ValueError(
@@ -161,3 +189,25 @@ def validate_route_catalog(
     if revision != expected_revision:
         raise ValueError("catalog revision does not match its route manifests")
     return RouteCatalogSnapshot(revision=revision, routes=routes)
+
+
+def match_route_path(template: str, request_path: str) -> dict[str, str] | None:
+    """Match one validated exact/segment-template route without regex input."""
+
+    if "{" not in template:
+        return {} if template == request_path else None
+    template_segments = template.removeprefix("/").split("/")
+    request_segments = request_path.removeprefix("/").split("/")
+    if len(template_segments) != len(request_segments):
+        return None
+    parameters: dict[str, str] = {}
+    for expected, actual in zip(template_segments, request_segments):
+        parameter = _PATH_PARAMETER_SEGMENT.fullmatch(expected)
+        if parameter is None:
+            if expected != actual:
+                return None
+            continue
+        if _REQUEST_PATH_SEGMENT.fullmatch(actual) is None:
+            return None
+        parameters[parameter.group(1)] = actual
+    return parameters

@@ -134,6 +134,127 @@ def test_websocket_catalog_makes_runtime_path_execute_on_bff() -> None:
     }
 
 
+def test_segment_template_route_sends_validated_path_parameter_to_bff() -> None:
+    app = FastAPI()
+    mount_studio_route_host(app=app, enabled=True)
+    manifest = {
+        **_manifest("/harness/skills/spaces/{space_id}/skills"),
+        "id": "studio_list_skills_in_space",
+    }
+    revision = route_catalog_revision([manifest])
+    result: dict[str, Any] = {}
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/__studio/routes/v1/channel") as websocket:
+            websocket.send_json(
+                {"type": "channel.hello", "protocol": ROUTE_PROTOCOL_VERSION}
+            )
+            ready = websocket.receive_json()
+            assert ready["type"] == "channel.ready"
+            websocket.send_json(
+                {
+                    "type": "route.catalog.replace",
+                    "revision": revision,
+                    "routes": [manifest],
+                }
+            )
+            assert websocket.receive_json()["type"] == "route.catalog.ack"
+
+            def request_route() -> None:
+                response = client.get(
+                    "/harness/skills/spaces/space-123/skills?region=cn-beijing"
+                )
+                result["status"] = response.status_code
+                result["body"] = response.json()
+
+            request_thread = Thread(target=request_route)
+            request_thread.start()
+            route_call = websocket.receive_json()
+            assert route_call["route_id"] == "studio_list_skills_in_space"
+            assert route_call["request"]["path_params"] == {"space_id": "space-123"}
+            websocket.send_json(
+                {
+                    "type": "route.result",
+                    "request_id": route_call["request_id"],
+                    "catalog_revision": revision,
+                    "response": {
+                        "status": 200,
+                        "body": {"items": [], "totalCount": 0},
+                    },
+                }
+            )
+            request_thread.join(timeout=5)
+
+    assert result == {
+        "status": 200,
+        "body": {"items": [], "totalCount": 0},
+    }
+
+
+def test_only_allowlisted_harness_routes_can_be_registered() -> None:
+    app = FastAPI()
+    mount_studio_route_host(app=app, enabled=True)
+    manifest = _manifest("/harness/apps")
+    revision = route_catalog_revision([manifest])
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/__studio/routes/v1/channel") as websocket:
+            websocket.send_json(
+                {"type": "channel.hello", "protocol": ROUTE_PROTOCOL_VERSION}
+            )
+            websocket.receive_json()
+            websocket.send_json(
+                {
+                    "type": "route.catalog.replace",
+                    "revision": revision,
+                    "routes": [manifest],
+                }
+            )
+            rejection = websocket.receive_json()
+
+    assert rejection["type"] == "route.catalog.nack"
+    assert "reserved route path" in rejection["error"]
+
+
+def test_skill_catalog_routes_reject_write_methods() -> None:
+    app = FastAPI()
+    mount_studio_route_host(app=app, enabled=True)
+    manifest = {
+        **_manifest("/harness/skills/spaces"),
+        "method": "POST",
+    }
+    revision = route_catalog_revision([manifest])
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/__studio/routes/v1/channel") as websocket:
+            websocket.send_json(
+                {"type": "channel.hello", "protocol": ROUTE_PROTOCOL_VERSION}
+            )
+            websocket.receive_json()
+            websocket.send_json(
+                {
+                    "type": "route.catalog.replace",
+                    "revision": revision,
+                    "routes": [manifest],
+                }
+            )
+            rejection = websocket.receive_json()
+
+    assert rejection["type"] == "route.catalog.nack"
+    assert "must use GET" in rejection["error"]
+
+
+def test_arbitrary_path_templates_are_rejected() -> None:
+    manifest = _manifest("/customer/{customer_id}")
+
+    try:
+        route_catalog_revision([manifest])
+    except ValueError as error:
+        assert "path parameters are limited" in str(error)
+    else:
+        raise AssertionError("arbitrary path template was accepted")
+
+
 def test_reserved_route_catalog_is_rejected_without_replacing_native_route() -> None:
     app = FastAPI()
 

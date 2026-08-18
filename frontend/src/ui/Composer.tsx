@@ -343,6 +343,7 @@ export function Composer({
   const videoTaskRunning = isVideoTaskRunning(videoTask);
   const canOpenVideoTask = videoMode && Boolean(videoTask) && !value.trim();
   const canStop = busy && Boolean(onStop);
+  const canOpenAddMenu = Boolean(studioTools) || (!disabled && allowAttachments);
   const canSend = videoMode
     ? videoTaskRunning ||
       canOpenVideoTask ||
@@ -659,7 +660,7 @@ export function Composer({
             className="comp-icon"
             title="添加"
             aria-label="添加"
-            disabled={disabled || !allowAttachments}
+            disabled={!canOpenAddMenu}
             onClick={() => {
               setTrigger(null);
               setStudioToolsOpen(false);

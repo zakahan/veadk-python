@@ -120,6 +120,14 @@ async def runtime_supports_bff_routes(
         raise StudioRouteChannelError(
             "Runtime enabled BFF routes without a supported transport."
         )
+    route_modes = capability.get("route_modes")
+    if not isinstance(route_modes, list) or not {
+        "exact",
+        "segment-template",
+    }.issubset(set(route_modes)):
+        raise StudioRouteChannelError(
+            "Runtime enabled BFF routes without the required route modes."
+        )
     return True
 
 

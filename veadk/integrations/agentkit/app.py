@@ -861,6 +861,8 @@ def _configure_dynamic_a2a_routes(
 def _configure_session_capability_routes(
     app: FastAPI,
     root_agent: BaseAgent,
+    *,
+    include_skill_catalog: bool = True,
 ) -> None:
     services = _RuntimeServices(app)
     if services.session_service is None:
@@ -871,7 +873,11 @@ def _configure_session_capability_routes(
         session_service=services.session_service,
     )
     setattr(app.state, _SESSION_CAPABILITY_SERVICE_STATE_KEY, capability_service)
-    mount_session_capability_routes(app=app, service=capability_service)
+    mount_session_capability_routes(
+        app=app,
+        service=capability_service,
+        include_skill_catalog=include_skill_catalog,
+    )
 
     async def _build_run(
         req: RunAgentRequest,
@@ -1120,7 +1126,9 @@ def create_agentkit_app(
             ``FEISHU_APP_ID`` and ``FEISHU_APP_SECRET``.
         enable_studio_routes: Whether to mount the generic Runtime host for
             Studio BFF-owned dynamic HTTP routes. Route handlers remain in the
-            Studio BFF and are never loaded into the Runtime process.
+            Studio BFF and are never loaded into the Runtime process. Enabled
+            Runtimes leave the three read-only Skill catalog routes to Studio;
+            other Runtimes retain their native compatibility handlers.
         identity: Optional AgentKit Runtime identity boundary. When supplied,
             AgentKit verifies and binds the inbound user identity before VeADK
             Agent or Tool code runs.
@@ -1148,7 +1156,11 @@ def create_agentkit_app(
     app = cast(FastAPI, agent_server.app)
     setattr(app.state, _SERVER_STATE_KEY, agent_server)
     _configure_dynamic_a2a_routes(app, root_agent)
-    _configure_session_capability_routes(app, root_agent)
+    _configure_session_capability_routes(
+        app,
+        root_agent,
+        include_skill_catalog=not enable_studio_routes,
+    )
 
     if enable_feishu:
         _configure_feishu_lifecycle(app, root_agent, short_term_memory)

@@ -42,6 +42,7 @@ from veadk.integrations.agentkit.studio_routes.protocol import (
     ROUTE_PROTOCOL_VERSION,
     RouteCatalogSnapshot,
     StudioRouteManifest,
+    match_route_path,
     validate_route_catalog,
 )
 from veadk.utils.logger import get_logger
@@ -64,6 +65,12 @@ class _PendingRouteCall:
     catalog_revision: str
 
 
+@dataclass(frozen=True)
+class _MatchedRoute:
+    manifest: StudioRouteManifest
+    path_params: dict[str, str]
+
+
 class StudioRouteHost:
     """Own the effective route catalog and its currently connected provider."""
 
@@ -72,7 +79,7 @@ class StudioRouteHost:
         self.catalog: RouteCatalogSnapshot | None = None
         self.provider: _StudioRouteConnection | None = None
         self._route_by_key: dict[tuple[str, str], StudioRouteManifest] = {}
-        self._methods_by_path: dict[str, set[str]] = {}
+        self._template_routes: tuple[StudioRouteManifest, ...] = ()
         self._catalog_lock = asyncio.Lock()
 
     async def install_catalog(
@@ -81,25 +88,40 @@ class StudioRouteHost:
         snapshot: RouteCatalogSnapshot,
     ) -> None:
         route_by_key = {(route.method, route.path): route for route in snapshot.routes}
-        methods_by_path: dict[str, set[str]] = {}
-        for route in snapshot.routes:
-            methods_by_path.setdefault(route.path, set()).add(route.method)
+        template_routes = tuple(route for route in snapshot.routes if "{" in route.path)
         async with self._catalog_lock:
             self.catalog = snapshot
             self.provider = connection
             self._route_by_key = route_by_key
-            self._methods_by_path = methods_by_path
+            self._template_routes = template_routes
 
     async def provider_disconnected(self, connection: _StudioRouteConnection) -> None:
         async with self._catalog_lock:
             if self.provider is connection:
                 self.provider = None
 
-    def route_for(self, method: str, path: str) -> StudioRouteManifest | None:
-        return self._route_by_key.get((method.upper(), path))
+    def route_for(self, method: str, path: str) -> _MatchedRoute | None:
+        exact = self._route_by_key.get((method.upper(), path))
+        if exact is not None:
+            return _MatchedRoute(manifest=exact, path_params={})
+        for route in self._template_routes:
+            if route.method != method.upper():
+                continue
+            path_params = match_route_path(route.path, path)
+            if path_params is not None:
+                return _MatchedRoute(manifest=route, path_params=path_params)
+        return None
 
     def methods_for(self, path: str) -> set[str]:
-        return self._methods_by_path.get(path, set())
+        methods = {
+            method for method, route_path in self._route_by_key if route_path == path
+        }
+        methods.update(
+            route.method
+            for route in self._template_routes
+            if match_route_path(route.path, path) is not None
+        )
+        return methods
 
     async def execute(
         self,
@@ -119,7 +141,7 @@ class StudioRouteHost:
 
 
 class StudioDynamicRouteMiddleware:
-    """Intercept exact Studio routes while leaving every other ASGI scope intact."""
+    """Intercept validated Studio routes while leaving other ASGI scopes intact."""
 
     def __init__(self, app: ASGIApp, *, host: StudioRouteHost) -> None:
         self.app = app
@@ -131,8 +153,8 @@ class StudioDynamicRouteMiddleware:
             return
         method = str(scope.get("method") or "GET").upper()
         path = str(scope.get("path") or "/")
-        route = self.host.route_for(method, path)
-        if route is None:
+        matched_route = self.host.route_for(method, path)
+        if matched_route is None:
             allowed = self.host.methods_for(path)
             if allowed:
                 await JSONResponse(
@@ -146,8 +168,9 @@ class StudioDynamicRouteMiddleware:
 
         try:
             request_payload = await _read_request(scope, receive)
+            request_payload["path_params"] = matched_route.path_params
             route_response = await self.host.execute(
-                route=route,
+                route=matched_route.manifest,
                 request_payload=request_payload,
             )
             response = _response_from_route_result(route_response)
@@ -372,7 +395,7 @@ def _native_route_keys(app: FastAPI) -> set[tuple[str, str]]:
     for route in app.router.routes:
         path = getattr(route, "path", None)
         methods = getattr(route, "methods", None)
-        if not isinstance(path, str) or not methods or "{" in path:
+        if not isinstance(path, str) or not methods:
             continue
         for method in methods:
             keys.add((str(method).upper(), path))
@@ -408,7 +431,7 @@ def mount_studio_route_host(*, app: FastAPI, enabled: bool = False) -> StudioRou
             "enabled": enabled,
             "protocol": ROUTE_PROTOCOL_VERSION,
             "transports": ["websocket", "http-sse"] if enabled else [],
-            "route_modes": ["exact"] if enabled else [],
+            "route_modes": ["exact", "segment-template"] if enabled else [],
         }
 
     _promote_endpoints(studio_route_capabilities)

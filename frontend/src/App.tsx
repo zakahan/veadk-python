@@ -1299,6 +1299,12 @@ export default function App() {
     useState<RuntimeStudioToolCapabilities | null>(null);
   const [studioToolsLoading, setStudioToolsLoading] = useState(false);
   const [studioToolsError, setStudioToolsError] = useState("");
+  const [draftStudioRuntime, setDraftStudioRuntime] = useState<{
+    appName: string;
+    runtimeId: string;
+    name: string;
+    region: string;
+  } | null>(null);
   const [draftStudioToolIds, setDraftStudioToolIds] = useState<string[]>([]);
   const [studioToolIdsBySession, setStudioToolIdsBySession] = useState<
     Record<string, string[]>
@@ -5228,19 +5234,22 @@ export default function App() {
           region: currentConn.region,
         }
       : undefined;
+  const selectedDraftStudioRuntime =
+    draftStudioRuntime?.appName === appName ? draftStudioRuntime : undefined;
+  const studioToolRuntime = currentRuntime ?? selectedDraftStudioRuntime;
 
   useEffect(() => {
     let cancelled = false;
     setStudioToolCapabilities(null);
     setStudioToolsError("");
-    if (authStatus !== "authenticated" || !access || !currentRuntime) {
+    if (authStatus !== "authenticated" || !access || !studioToolRuntime) {
       setStudioToolsLoading(false);
       return;
     }
     setStudioToolsLoading(true);
     getRuntimeStudioToolCapabilities(
-      currentRuntime.runtimeId,
-      currentRuntime.region,
+      studioToolRuntime.runtimeId,
+      studioToolRuntime.region,
     )
       .then((capabilities) => {
         if (!cancelled) setStudioToolCapabilities(capabilities);
@@ -5257,7 +5266,12 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [access, authStatus, currentRuntime?.region, currentRuntime?.runtimeId]);
+  }, [
+    access,
+    authStatus,
+    studioToolRuntime?.region,
+    studioToolRuntime?.runtimeId,
+  ]);
 
   if (authError) {
     return (
@@ -5666,7 +5680,11 @@ export default function App() {
 
   const connectMyAgent = async (
     agent: MyAgentCardData,
-    options: { rethrow?: boolean; source?: AgentConnectSource } = {},
+    options: {
+      rethrow?: boolean;
+      source?: AgentConnectSource;
+      onConnected?: (agentId: string) => void;
+    } = {},
   ) => {
     if (!agent.runtime) return;
     try {
@@ -5675,6 +5693,7 @@ export default function App() {
         options.source ?? "my_agents",
       );
       await refreshCurrentAgentAndStartNewChat(agentId);
+      options.onConnected?.(agentId);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError(message);
@@ -6205,7 +6224,10 @@ export default function App() {
               showMeta={turns.length > 0 && !sandboxSession}
               attachments={sandboxSession ? [] : attachments}
               studioTools={
-                !sandboxSession && currentRuntime
+                !sandboxSession &&
+                studioToolRuntime &&
+                newChatWorkspaceMode === "agent" &&
+                newChatMode === "agent"
                   ? {
                       tools: studioToolCapabilities?.tools ?? [],
                       selectedIds: selectedStudioToolIds,
@@ -6246,30 +6268,48 @@ export default function App() {
                 newChatMode === "agent"
               }
               agentPickerDisabled={!userId || conversationBusy}
-              selectedRuntimeId={currentRuntime?.runtimeId}
+              selectedRuntimeId={studioToolRuntime?.runtimeId}
               runtimeScope={access.capabilities.runtimeScope}
               onSelectRuntime={async (runtime) => {
-                await connectMyAgent(
-                  {
-                    id: runtime.runtimeId,
-                    name: runtime.name,
-                    description: runtime.description?.trim() || "暂无描述",
-                    createdAt: runtime.createdAt ?? "",
-                    specificationLabel: "地域",
-                    specification: formatCloudRegion(
-                      runtime.region,
-                      cloudProvider,
-                    ),
-                    isMine: runtime.isMine,
-                    runtime: {
-                      runtimeId: runtime.runtimeId,
-                      region: runtime.region,
-                      currentVersion: runtime.currentVersion,
-                      canDelete: runtime.canDelete,
+                try {
+                  await connectMyAgent(
+                    {
+                      id: runtime.runtimeId,
+                      name: runtime.name,
+                      description: runtime.description?.trim() || "暂无描述",
+                      createdAt: runtime.createdAt ?? "",
+                      specificationLabel: "地域",
+                      specification: formatCloudRegion(
+                        runtime.region,
+                        cloudProvider,
+                      ),
+                      isMine: runtime.isMine,
+                      runtime: {
+                        runtimeId: runtime.runtimeId,
+                        region: runtime.region,
+                        currentVersion: runtime.currentVersion,
+                        canDelete: runtime.canDelete,
+                      },
                     },
-                  },
-                  { rethrow: true, source: "new_chat_picker" },
-                );
+                    {
+                      rethrow: true,
+                      source: "new_chat_picker",
+                      onConnected: (agentId) => {
+                        setDraftStudioRuntime({
+                          appName: agentId,
+                          runtimeId: runtime.runtimeId,
+                          name: runtime.name,
+                          region: runtime.region,
+                        });
+                      },
+                    },
+                  );
+                } catch (cause) {
+                  setDraftStudioRuntime((current) =>
+                    current?.runtimeId === runtime.runtimeId ? null : current,
+                  );
+                  throw cause;
+                }
               }}
               onSelectSandboxSession={(session) =>
                 openSandboxAgent(session, "new_chat_picker")

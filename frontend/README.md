@@ -286,17 +286,28 @@ A deployable Runtime agent and launch scripts live in the
 A compatible Runtime can also expose Studio-owned HTTP routes without loading
 their Python handlers. Build the Runtime app with
 `create_agentkit_app(..., enable_studio_routes=True)` and start Studio with
-`VEADK_STUDIO_ROUTE_CHANNEL=demo`. After Studio connects the Runtime, the BFF
-keeps a separate persistent reverse-route channel and publishes the exact route
-catalog. The built-in verification route is `GET /print_hello`.
+`VEADK_STUDIO_ROUTE_CHANNEL=skill-catalog` (`demo` remains a compatibility
+alias). After Studio connects the Runtime, the BFF keeps a separate persistent
+reverse-route channel and publishes these Studio-owned, read-only routes:
+
+- `GET /harness/skills/findskill`
+- `GET /harness/skills/spaces`
+- `GET /harness/skills/spaces/{space_id}/skills`
+
+Runtimes without the dynamic-route opt-in keep their native Skill catalog
+handlers. Opted-in Runtimes leave those three query handlers to Studio while
+retaining session capability reads/writes and Skill execution locally.
+The segment-template request contract is protocol v2, so a Runtime using the
+older route-channel protocol must be updated once before accepting this catalog.
 
 Requests still enter through the Runtime URL. Its dynamic dispatcher emits
 `route.call`, the local BFF executes the handler, and `route.result` becomes the
 Runtime HTTP response. WSS is preferred; unsupported gateways automatically use
 a long-lived HTTP/SSE downlink plus HTTP result posts. The current implementation
-is a single-instance demo: both the persistent stream and arbitrary route
-requests must reach the same Runtime process. A disconnected BFF leaves the
-known route unavailable with HTTP 503.
+is currently single-instance: both the persistent stream and arbitrary route
+requests must reach the same Runtime process. A disconnected BFF leaves known
+Studio-owned routes unavailable with HTTP 503; Agent runs and existing session
+capabilities remain available.
 
 Local Studio reads transient and snapshot Tool IDs from
 `SANDBOX_CHAT_CODEX`/`SANDBOX_CHAT_CODEX_SNAPSHOT`,

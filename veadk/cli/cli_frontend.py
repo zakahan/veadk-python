@@ -1319,7 +1319,7 @@ def _run_frontend_server(
             studio_tool_registry.revision,
         )
 
-    studio_route_registry = build_studio_route_registry()
+    studio_route_registry = build_studio_route_registry(provider=provider)
     studio_route_channels = StudioRouteChannelManager(studio_route_registry)
     app.state.studio_route_registry = studio_route_registry
     app.state.studio_route_channels = studio_route_channels
@@ -6229,7 +6229,14 @@ def _run_frontend_server(
         ):
             raise HTTPException(status_code=400, detail="invalid method override")
         upstream_method = method_override or request.method
-        region = _coerce_cloud_region(request.query_params.get("region"))
+        # `_runtime_region` selects the Runtime and is never forwarded. Keep
+        # accepting `region` for older Studio bundles, where it was a proxy-only
+        # parameter. New bundles leave `region` available to upstream APIs such
+        # as the Skill Catalog endpoints.
+        proxy_region = request.query_params.get("_runtime_region")
+        region = _coerce_cloud_region(
+            proxy_region or request.query_params.get("region")
+        )
         try:
             runtime = _authorized_runtime(
                 request,
@@ -6249,10 +6256,13 @@ def _run_frontend_server(
             raise HTTPException(status_code=502, detail=str(e))
 
         # Drop Studio-only query params; keep any real API query params.
+        studio_query_params = {"probe_retry", "_method", "_runtime_region"}
+        if proxy_region is None:
+            studio_query_params.add("region")
         qs = {
             k: v
             for k, v in request.query_params.items()
-            if k not in {"region", "probe_retry", "_method"}
+            if k not in studio_query_params
         }
         target = f"{endpoint.rstrip('/')}/{path}"
         target_host = _runtime_endpoint_host(target)

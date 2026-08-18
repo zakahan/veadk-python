@@ -22,7 +22,13 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qs
 
+from frontend.server.storage import StudioProvider
+from frontend.server.studio_routes.skill_catalog import (
+    StudioSkillCatalog,
+    StudioSkillCatalogError,
+)
 from veadk.integrations.agentkit.studio_routes import (
     StudioRouteManifest,
     route_catalog_revision,
@@ -121,34 +127,147 @@ class StudioRouteRegistry:
         return StudioRouteResponse(body=result)
 
 
-def _register_demo_routes(registry: StudioRouteRegistry) -> None:
-    def print_hello(request: dict[str, Any]) -> StudioRouteResponse:
-        del request
-        return StudioRouteResponse(
-            headers={"content-type": "application/json"},
-            body={
-                "message": "hello from Studio BFF",
-                "executed_by": "studio-bff",
-                "bff_process_id": os.getpid(),
-            },
+def _query_values(request: dict[str, Any]) -> dict[str, list[str]]:
+    raw_query = request.get("query_string")
+    if not isinstance(raw_query, str):
+        raise StudioSkillCatalogError(400, "invalid route query string")
+    try:
+        return parse_qs(
+            raw_query,
+            keep_blank_values=True,
+            strict_parsing=False,
+            max_num_fields=20,
         )
+    except ValueError as error:
+        raise StudioSkillCatalogError(400, "invalid route query string") from error
+
+
+def _single_query(
+    query: dict[str, list[str]],
+    name: str,
+    default: str,
+) -> str:
+    values = query.get(name)
+    if not values:
+        return default
+    if len(values) != 1:
+        raise StudioSkillCatalogError(400, f"duplicate query parameter: {name}")
+    return values[0]
+
+
+def _positive_int_query(
+    query: dict[str, list[str]],
+    name: str,
+    default: int,
+) -> int:
+    raw_value = _single_query(query, name, str(default))
+    try:
+        return int(raw_value)
+    except ValueError as error:
+        raise StudioSkillCatalogError(
+            400,
+            f"invalid integer query parameter: {name}",
+        ) from error
+
+
+def _catalog_response(error: StudioSkillCatalogError) -> StudioRouteResponse:
+    return StudioRouteResponse(
+        status=error.status_code,
+        headers={"content-type": "application/json"},
+        body={"detail": error.detail},
+    )
+
+
+def _register_skill_catalog_routes(
+    registry: StudioRouteRegistry,
+    catalog: StudioSkillCatalog,
+) -> None:
+    async def findskill(request: dict[str, Any]) -> StudioRouteResponse:
+        try:
+            query = _query_values(request)
+            body = await catalog.search_findskill(
+                query=_single_query(query, "query", ""),
+                page_number=_positive_int_query(query, "page_number", 1),
+                page_size=_positive_int_query(query, "page_size", 20),
+            )
+        except StudioSkillCatalogError as error:
+            return _catalog_response(error)
+        return StudioRouteResponse(body=body)
+
+    async def list_spaces(request: dict[str, Any]) -> StudioRouteResponse:
+        try:
+            query = _query_values(request)
+            body = await catalog.list_spaces(
+                region=_single_query(query, "region", "all"),
+            )
+        except StudioSkillCatalogError as error:
+            return _catalog_response(error)
+        return StudioRouteResponse(body=body)
+
+    async def list_skills(request: dict[str, Any]) -> StudioRouteResponse:
+        try:
+            query = _query_values(request)
+            path_params = request.get("path_params")
+            if not isinstance(path_params, dict):
+                raise StudioSkillCatalogError(400, "missing route path parameters")
+            space_id = path_params.get("space_id")
+            if not isinstance(space_id, str):
+                raise StudioSkillCatalogError(400, "missing Skill Space id")
+            body = await catalog.list_skills(
+                space_id=space_id,
+                region=_single_query(
+                    query,
+                    "region",
+                    "ap-southeast-1"
+                    if catalog.provider == "byteplus"
+                    else "cn-beijing",
+                ),
+            )
+        except StudioSkillCatalogError as error:
+            return _catalog_response(error)
+        return StudioRouteResponse(body=body)
 
     registry.register(
         StudioRoute(
-            id="print_hello",
+            id="studio_findskill",
             method="GET",
-            path="/print_hello",
-            executor=print_hello,
-            handler_revision="demo-print-hello-v1",
+            path="/harness/skills/findskill",
+            executor=findskill,
+            handler_revision="studio-skill-catalog-v1",
+        )
+    )
+    registry.register(
+        StudioRoute(
+            id="studio_list_skill_spaces",
+            method="GET",
+            path="/harness/skills/spaces",
+            executor=list_spaces,
+            handler_revision="studio-skill-catalog-v1",
+        )
+    )
+    registry.register(
+        StudioRoute(
+            id="studio_list_skills_in_space",
+            method="GET",
+            path="/harness/skills/spaces/{space_id}/skills",
+            executor=list_skills,
+            handler_revision="studio-skill-catalog-v1",
         )
     )
 
 
-def build_studio_route_registry() -> StudioRouteRegistry:
+def build_studio_route_registry(
+    *,
+    provider: StudioProvider = "volcengine",
+    skill_catalog: StudioSkillCatalog | None = None,
+) -> StudioRouteRegistry:
     """Build the BFF route registry selected by server-owned configuration."""
 
     registry = StudioRouteRegistry()
     mode = os.getenv("VEADK_STUDIO_ROUTE_CHANNEL", "").strip().lower()
-    if mode in {"1", "true", "yes", "demo"}:
-        _register_demo_routes(registry)
+    if mode in {"1", "true", "yes", "demo", "skill-catalog"}:
+        _register_skill_catalog_routes(
+            registry,
+            skill_catalog or StudioSkillCatalog(provider),
+        )
     return registry

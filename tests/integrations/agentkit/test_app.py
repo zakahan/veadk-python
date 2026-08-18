@@ -206,7 +206,16 @@ def test_create_agentkit_app_uses_agent_bff_tool_opt_in(
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_create_agentkit_app_uses_runtime_bff_route_opt_in(enabled: bool) -> None:
+def test_create_agentkit_app_uses_runtime_bff_route_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+) -> None:
+    class SessionAgentServer(_FakeAgentServer):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.session_service = object()
+
+    monkeypatch.setattr(agentkit_app, "AgentkitAgentServerApp", SessionAgentServer)
     app = agentkit_app.create_agentkit_app(
         _root_agent(),
         enable_studio_routes=enabled,
@@ -217,10 +226,22 @@ def test_create_agentkit_app_uses_runtime_bff_route_opt_in(enabled: bool) -> Non
     assert capability.status_code == 200
     assert capability.json() == {
         "enabled": enabled,
-        "protocol": "studio-route-channel/1",
+        "protocol": "studio-route-channel/2",
         "transports": ["websocket", "http-sse"] if enabled else [],
-        "route_modes": ["exact"] if enabled else [],
+        "route_modes": ["exact", "segment-template"] if enabled else [],
     }
+    paths = {
+        getattr(candidate, "path", "")
+        for route in app.routes
+        for candidate in (
+            route,
+            *getattr(getattr(route, "original_router", None), "routes", ()),
+        )
+    }
+    assert ("/harness/skills/findskill" in paths) == (not enabled)
+    assert ("/harness/skills/spaces" in paths) == (not enabled)
+    assert ("/harness/skills/spaces/{space_id}/skills" in paths) == (not enabled)
+    assert "/harness/capabilities/tools" in paths
 
 
 def test_create_agentkit_app_requires_new_agentkit_only_when_identity_is_used(

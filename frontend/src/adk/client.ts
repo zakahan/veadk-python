@@ -415,7 +415,9 @@ async function apiFetch(
     };
     if (ep.runtimeId) {
       const runtimeParams = new URLSearchParams();
-      if (ep.region) runtimeParams.set("region", ep.region);
+      // Keep the proxy's control-plane region separate from API query params.
+      // Skill Catalog endpoints also use `region` for their own filtering.
+      if (ep.region) runtimeParams.set("_runtime_region", ep.region);
       if (ep.retryProbe) runtimeParams.set("probe_retry", "connect");
       if (runtimeMethodOverride) runtimeParams.set("_method", "DELETE");
       const rq = runtimeParams.toString()

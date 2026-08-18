@@ -23,6 +23,7 @@ from veadk.integrations.agentkit.studio_routes.protocol import (
     ROUTE_PROTOCOL_VERSION,
     RouteCatalogSnapshot,
     StudioRouteManifest,
+    match_route_path,
     route_catalog_revision,
 )
 
@@ -32,6 +33,7 @@ __all__ = [
     "StudioDynamicRouteMiddleware",
     "StudioRouteHost",
     "StudioRouteManifest",
+    "match_route_path",
     "mount_studio_route_host",
     "route_catalog_revision",
 ]

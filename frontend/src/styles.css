@@ -1301,6 +1301,10 @@ body {
   font-weight: 600;
   letter-spacing: -0.02em;
 }
+.welcome .composer-slot {
+  position: relative;
+  z-index: 20;
+}
 .welcome .composer { padding: 0; }
 
 .turn {
@@ -2690,6 +2694,7 @@ body {
 }
 .composer--new-chat .composer-menu-wrap {
   position: absolute;
+  z-index: 3;
   bottom: 10px;
   left: 10px;
   height: 36px;

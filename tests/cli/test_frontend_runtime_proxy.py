@@ -1284,6 +1284,81 @@ def test_runtime_proxy_uses_authorizer_credential(
     assert upstream_headers["Authorization"] == expected_authorization
 
 
+def test_runtime_proxy_preserves_api_region_with_distinct_runtime_region(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app = _create_frontend_app(monkeypatch, tmp_path)
+
+    class _FakeRuntimeClient:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["region"] == "cn-beijing"
+
+        def get_runtime(self, request: Any) -> SimpleNamespace:
+            del request
+            return SimpleNamespace(
+                network_configurations=[
+                    SimpleNamespace(
+                        endpoint="https://runtime.example", network_type="public"
+                    )
+                ],
+                authorizer_configuration=SimpleNamespace(
+                    key_auth=SimpleNamespace(api_key="runtime-api-key"),
+                    custom_jwt_authorizer=None,
+                ),
+            )
+
+    monkeypatch.setattr(
+        "agentkit.sdk.runtime.client.AgentkitRuntimeClient",
+        _FakeRuntimeClient,
+    )
+    forwarded_params: dict[str, str] = {}
+
+    class _FakeUpstreamResponse:
+        status_code = 200
+        headers: ClassVar[dict[str, str]] = {"content-type": "application/json"}
+
+        async def aiter_raw(self):
+            yield b'{"items": []}'
+
+        async def aclose(self) -> None:
+            pass
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def build_request(
+            self,
+            method: str,
+            url: str,
+            *,
+            params: dict[str, str],
+            headers: dict[str, str],
+            content: bytes,
+        ) -> object:
+            del method, url, headers, content
+            forwarded_params.update(params)
+            return object()
+
+        async def send(self, request: object, *, stream: bool) -> _FakeUpstreamResponse:
+            del request, stream
+            return _FakeUpstreamResponse()
+
+        async def aclose(self) -> None:
+            pass
+
+    monkeypatch.setattr("httpx.AsyncClient", _FakeAsyncClient)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/web/runtime-proxy/runtime-1/harness/skills/spaces"
+            "?region=all&_runtime_region=cn-beijing"
+        )
+
+    assert response.status_code == 200
+    assert forwarded_params == {"region": "all"}
+
+
 def test_runtime_proxy_accepts_post_delete_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -384,6 +384,34 @@ async def test_harness_skill_catalog_routes_list_spaces_and_skills(
 
 
 @pytest.mark.asyncio
+async def test_skill_catalog_routes_can_move_out_without_removing_session_routes() -> (
+    None
+):
+    service, session_service, _ = await _service()
+    await session_service.create_session(
+        app_name="agent", user_id="user-1", session_id="session-a"
+    )
+    app = FastAPI()
+    capabilities.mount_session_capability_routes(
+        app=app,
+        service=service,
+        include_skill_catalog=False,
+    )
+    client = TestClient(app)
+
+    assert client.get("/harness/skills/findskill").status_code == 404
+    assert client.get("/harness/skills/spaces").status_code == 404
+    assert client.get("/harness/skills/spaces/space-1/skills").status_code == 404
+    assert client.get("/harness/capabilities/tools").status_code == 200
+    assert (
+        client.get(
+            "/harness/apps/agent/users/user-1/sessions/session-a/capabilities"
+        ).status_code
+        == 200
+    )
+
+
+@pytest.mark.asyncio
 async def test_harness_findskill_route_returns_public_slugs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
