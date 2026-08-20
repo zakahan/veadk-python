@@ -1309,8 +1309,11 @@ def _run_frontend_server(
         build_studio_route_registry,
     )
     from frontend.server.studio_tools import build_studio_tool_registry
+    from veadk.multimodal.service import MediaService
+    from veadk.multimodal.storage import create_media_storage
 
-    studio_tool_registry = build_studio_tool_registry()
+    media_service = MediaService(create_media_storage())
+    studio_tool_registry = build_studio_tool_registry(media_service=media_service)
     app.state.studio_tool_registry = studio_tool_registry
     if studio_tool_registry.enabled:
         logger.info(
@@ -1376,12 +1379,6 @@ def _run_frontend_server(
     if adk_server is None:
         raise RuntimeError("Unable to access the ADK API server services")
 
-    from veadk.integrations.agentkit.app import (
-        configure_multi_app_session_capability_routes,
-    )
-
-    configure_multi_app_session_capability_routes(app, adk_server)
-
     # ``web=False`` deliberately keeps ADK's full development API disabled,
     # but the VeADK trace drawer needs this one read-only endpoint. Register a
     # dedicated in-memory exporter instead of enabling eval/builder endpoints.
@@ -1429,12 +1426,9 @@ def _run_frontend_server(
         runtime_belongs_to,
     )
     from veadk.multimodal.api import mount_media_routes
-    from veadk.multimodal.service import MediaService
-    from veadk.multimodal.storage import create_media_storage
     from veadk.multimodal.transport import resolve_runtime_media
 
     _agent_loader = AgentLoader(agents_dir)
-    media_service = MediaService(create_media_storage())
     mount_media_routes(app, media_service)
 
     # Generated-agent debug is intentionally feature-complete in both local and
@@ -2807,13 +2801,13 @@ def _run_frontend_server(
         page_number: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=50),
     ) -> dict[str, Any]:
-        """Expose the same public Skill Hub search contract used by chat skills."""
+        """Expose the public Skill Hub search contract used by Agent creation."""
         try:
-            from veadk.integrations.agentkit.session_capabilities import (
-                _search_findskill,
+            from frontend.server.studio_routes.skill_catalog import (
+                StudioSkillCatalog,
             )
 
-            return await _search_findskill(
+            return await StudioSkillCatalog(provider).search_findskill(
                 query=query,
                 page_number=page_number,
                 page_size=page_size,
@@ -6291,7 +6285,7 @@ def _run_frontend_server(
         run_sse_payload: dict[str, Any] | None = None
         studio_tool_catalog: Any | None = None
         usage_invocation_id = ""
-        if request.method == "POST" and path in {"run_sse", "harness/run_sse"}:
+        if request.method == "POST" and path == "run_sse":
             try:
                 payload = json.loads(body)
             except json.JSONDecodeError as error:
@@ -6302,7 +6296,7 @@ def _run_frontend_server(
                 raise HTTPException(
                     status_code=400, detail="run_sse request body must be an object"
                 )
-            selected_tool_ids: list[str] | None = None
+            selected_tool_ids: list[str] = []
             if "platform_tools" in payload:
                 raw_tool_ids = payload.pop("platform_tools")
                 if not isinstance(raw_tool_ids, list) or any(
@@ -6395,7 +6389,7 @@ def _run_frontend_server(
             and studio_tool_catalog.enabled
             and run_sse_payload is not None
             and request.method == "POST"
-            and path in {"run_sse", "harness/run_sse"}
+            and path == "run_sse"
         ):
             from frontend.server.studio_tools import (
                 StudioChannelError,
@@ -6445,7 +6439,7 @@ def _run_frontend_server(
 
             if studio_run is None:
                 logger.info(
-                    "runtime Agent has BFF tools disabled; using plain run_sse "
+                    "runtime does not support BFF tools; using plain run_sse "
                     "runtime_id=%s target_host=%s",
                     runtime_id,
                     target_host,

@@ -32,13 +32,13 @@ from veadk.cli.cli_frontend import (
     _run_frontend_server,
     _runtime_regions,
 )
+from veadk.tools import list_builtin_tools
 
 
 def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
     app = _create_frontend_app(monkeypatch, tmp_path)
 
     class _FakeRuntimeClient:
@@ -107,6 +107,11 @@ def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
                 "user_id": "user-1",
                 "session_id": "session-1",
                 "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
+                "platform_tools": [
+                    "get_city_weather",
+                    "web_fetch",
+                    "web_search",
+                ],
             },
         )
 
@@ -116,9 +121,9 @@ def test_runtime_proxy_uses_same_socket_studio_tool_channel_when_enabled(
     assert opened["authorization"] == "Bearer runtime-api-key"
     assert opened["runtime_id"] == "runtime-1"
     assert {item["name"] for item in opened["catalog"].manifests()} == {
-        "studio_get_codebase_mr_status",
-        "studio_query_logs_by_logid",
-        "studio_read_lark_doc",
+        "get_city_weather",
+        "web_fetch",
+        "web_search",
     }
 
 
@@ -126,7 +131,6 @@ def test_runtime_proxy_builds_a_per_run_selected_tool_catalog(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
     app = _create_frontend_app(monkeypatch, tmp_path)
 
     class _FakeRuntimeClient:
@@ -186,13 +190,13 @@ def test_runtime_proxy_builds_a_per_run_selected_tool_catalog(
                 "user_id": "user-1",
                 "session_id": "session-1",
                 "new_message": {"role": "user", "parts": [{"text": "6 * 7"}]},
-                "platform_tools": ["studio_read_lark_doc"],
+                "platform_tools": ["get_city_weather"],
             },
         )
 
     assert response.status_code == 200
     assert [item["name"] for item in opened["catalog"].manifests()] == [
-        "studio_read_lark_doc"
+        "get_city_weather"
     ]
     assert "platform_tools" not in opened["payload"]
 
@@ -201,7 +205,6 @@ def test_runtime_tool_capabilities_expose_safe_local_metadata(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
     app = _create_frontend_app(monkeypatch, tmp_path)
 
     class _FakeRuntimeClient:
@@ -250,11 +253,7 @@ def test_runtime_tool_capabilities_expose_safe_local_metadata(
     body = response.json()
     assert body["enabled"] is True
     assert body["supported"] is True
-    assert {item["id"] for item in body["tools"]} == {
-        "studio_get_codebase_mr_status",
-        "studio_query_logs_by_logid",
-        "studio_read_lark_doc",
-    }
+    assert {item["id"] for item in body["tools"]} == set(list_builtin_tools())
     assert all("input_schema" not in item for item in body["tools"])
 
 
@@ -262,7 +261,6 @@ def test_empty_platform_tool_selection_uses_plain_run_without_forwarding_control
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
     app = _create_frontend_app(monkeypatch, tmp_path)
 
     class _FakeRuntimeClient:
@@ -418,11 +416,10 @@ def test_runtime_route_channel_connects_after_runtime_probe(
     }
 
 
-def test_runtime_proxy_uses_plain_run_sse_when_agent_disables_bff_tools(
+def test_runtime_proxy_uses_plain_run_sse_when_runtime_lacks_bff_tool_host(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("VEADK_STUDIO_TOOL_CHANNEL", "bytedcli")
     app = _create_frontend_app(monkeypatch, tmp_path)
 
     class _FakeRuntimeClient:
@@ -452,17 +449,17 @@ def test_runtime_proxy_uses_plain_run_sse_when_agent_disables_bff_tools(
         _FakeRuntimeClient,
     )
 
-    async def agent_disables_bff_tools(**kwargs: Any) -> bool:
+    async def runtime_lacks_bff_tool_host(**kwargs: Any) -> bool:
         del kwargs
         return False
 
     async def unexpected_channel(**kwargs: Any) -> None:
         del kwargs
-        raise AssertionError("disabled Agent must not open the BFF tool channel")
+        raise AssertionError("unsupported Runtime must not open the BFF tool channel")
 
     monkeypatch.setattr(
         "frontend.server.studio_tools.runtime_supports_bff_tools",
-        agent_disables_bff_tools,
+        runtime_lacks_bff_tool_host,
     )
     monkeypatch.setattr(
         "frontend.server.studio_tools.open_studio_tool_run",
@@ -505,6 +502,7 @@ def test_runtime_proxy_uses_plain_run_sse_when_agent_disables_bff_tools(
                 "user_id": "user-1",
                 "session_id": "session-1",
                 "new_message": {"role": "user", "parts": [{"text": "hello"}]},
+                "platform_tools": ["get_city_weather"],
             },
         )
 
@@ -1578,11 +1576,9 @@ def test_runtime_proxy_retry_policy(
         )
 
 
-@pytest.mark.parametrize("upstream_path", ["run_sse", "harness/run_sse"])
 def test_runtime_proxy_resolves_studio_media_before_forwarding(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    upstream_path: str,
 ) -> None:
     monkeypatch.setenv("VEADK_MEDIA_LOCAL_DIR", str(tmp_path / "media"))
     app = _create_frontend_app(monkeypatch, tmp_path)
@@ -1661,7 +1657,7 @@ def test_runtime_proxy_resolves_studio_media_before_forwarding(
         assert upload.status_code == 200
         media = upload.json()
         response = client.post(
-            f"/web/runtime-proxy/runtime-1/{upstream_path}?region=cn-beijing",
+            "/web/runtime-proxy/runtime-1/run_sse?region=cn-beijing",
             json={
                 "app_name": "demo",
                 "user_id": "user",
@@ -1693,12 +1689,6 @@ def test_runtime_proxy_resolves_studio_media_before_forwarding(
     [
         (
             "run_sse",
-            200,
-            [b'data: {"id":"event-1","author":"agent"}\n\n'],
-            1,
-        ),
-        (
-            "harness/run_sse",
             200,
             [b'data: {"id":"event-1","author":"agent"}\n\n'],
             1,

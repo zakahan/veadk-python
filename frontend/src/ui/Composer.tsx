@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ComponentType, SVGProps } from "react";
 import {
   AtSign,
@@ -22,7 +22,6 @@ import type {
   CloudRuntime,
   FrontendInvocation,
   RuntimeScope,
-  StudioBffTool,
 } from "../adk/client";
 import type { CloudProvider } from "../adk/cloudProvider";
 import type { SessionTokenUsage } from "../adk/tokenUsage";
@@ -61,19 +60,6 @@ import type {
 import { NEW_CHAT_TASK_TOOLS } from "./new-chat-modes/taskTools";
 import { VideoGenerateIcon } from "./builtin-tools/icons";
 import { TokenUsageIndicator } from "./TokenUsageIndicator";
-import {
-  StudioToolChips,
-  StudioToolPicker,
-  StudioToolsIcon,
-} from "./StudioToolPicker";
-
-export interface ComposerStudioTools {
-  tools: StudioBffTool[];
-  selectedIds: readonly string[];
-  loading?: boolean;
-  unavailableReason?: string;
-  onChange: (selectedIds: string[]) => void;
-}
 
 interface CompletionTrigger {
   kind: "skill" | "agent";
@@ -158,7 +144,6 @@ export interface ComposerProps {
   onInvocationChange: (value: FrontendInvocation) => void;
   onAddFiles: (files: FileList | File[]) => void;
   onRemoveAttachment: (id: string) => void;
-  studioTools?: ComposerStudioTools;
   newChatMode?: NewChatMode;
   newChatWorkspaceMode?: NewChatWorkspaceMode;
   newChatSkillAction?: NewChatSkillAction;
@@ -213,7 +198,6 @@ export function Composer({
   onInvocationChange,
   onAddFiles,
   onRemoveAttachment,
-  studioTools,
   newChatMode = "agent",
   newChatWorkspaceMode = "agent",
   newChatSkillAction = "create",
@@ -243,16 +227,10 @@ export function Composer({
   const imageInput = useRef<HTMLInputElement>(null);
   const documentInput = useRef<HTMLInputElement>(null);
   const videoInput = useRef<HTMLInputElement>(null);
-  const addMenuButton = useRef<HTMLButtonElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [studioToolsOpen, setStudioToolsOpen] = useState(false);
   const [trigger, setTrigger] = useState<CompletionTrigger | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [sessionIdCopied, setSessionIdCopied] = useState(false);
-  const closeStudioTools = useCallback(() => {
-    setStudioToolsOpen(false);
-    requestAnimationFrame(() => addMenuButton.current?.focus());
-  }, []);
   const [newChatVideoConfig, setNewChatVideoConfig] = useState(
     DEFAULT_NEW_CHAT_VIDEO_CONFIG,
   );
@@ -343,7 +321,6 @@ export function Composer({
   const videoTaskRunning = isVideoTaskRunning(videoTask);
   const canOpenVideoTask = videoMode && Boolean(videoTask) && !value.trim();
   const canStop = busy && Boolean(onStop);
-  const canOpenAddMenu = Boolean(studioTools) || (!disabled && allowAttachments);
   const canSend = videoMode
     ? videoTaskRunning ||
       canOpenVideoTask ||
@@ -535,14 +512,6 @@ export function Composer({
     <div
       className={`composer${newChatLayout ? " composer--new-chat" : ""}${selectedTask ? ` composer--has-task composer--task-${selectedTask.value}` : ""}`}
     >
-      {studioTools ? (
-        <StudioToolChips
-          tools={studioTools.tools}
-          selectedIds={studioTools.selectedIds}
-          disabled={busy}
-          onChange={studioTools.onChange}
-        />
-      ) : null}
       <InvocationChips
         value={invocation}
         onRemoveSkill={(name) =>
@@ -655,15 +624,13 @@ export function Composer({
         ) : null}
         <div className="composer-menu-wrap">
           <button
-            ref={addMenuButton}
             type="button"
             className="comp-icon"
             title="添加"
             aria-label="添加"
-            disabled={!canOpenAddMenu}
+            disabled={disabled || !allowAttachments}
             onClick={() => {
               setTrigger(null);
-              setStudioToolsOpen(false);
               setMenuOpen((o) => !o);
             }}
           >
@@ -673,73 +640,33 @@ export function Composer({
             <>
               <div className="menu-scrim" onClick={() => setMenuOpen(false)} />
               <div className="composer-menu" role="menu">
-                {allowAttachments ? (
-                  <>
-                    <button
-                      type="button"
-                      className="menu-item"
-                      onClick={() => pick(imageInput)}
-                    >
-                      <ImageIcon className="icon" />
-                      上传图片
-                    </button>
-                    <button
-                      type="button"
-                      className="menu-item"
-                      onClick={() => pick(documentInput)}
-                    >
-                      <FileText className="icon" />
-                      上传文档或 PDF
-                    </button>
-                    <button
-                      type="button"
-                      className="menu-item"
-                      onClick={() => pick(videoInput)}
-                    >
-                      <FileVideo2 className="icon" />
-                      上传视频
-                    </button>
-                  </>
-                ) : null}
-                {studioTools ? (
-                  <button
-                    type="button"
-                    className="menu-item"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      setStudioToolsOpen(true);
-                    }}
-                  >
-                    <StudioToolsIcon className="icon" />
-                    本地工具
-                    {studioTools.selectedIds.length > 0 ? (
-                      <span className="menu-item-count">
-                        {studioTools.selectedIds.length}
-                      </span>
-                    ) : null}
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => pick(imageInput)}
+                >
+                  <ImageIcon className="icon" />
+                  上传图片
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => pick(documentInput)}
+                >
+                  <FileText className="icon" />
+                  上传文档或 PDF
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => pick(videoInput)}
+                >
+                  <FileVideo2 className="icon" />
+                  上传视频
+                </button>
               </div>
             </>
           )}
-          {studioTools && studioToolsOpen ? (
-            <>
-              <div
-                className="menu-scrim"
-                onClick={closeStudioTools}
-              />
-              <StudioToolPicker
-                open
-                tools={studioTools.tools}
-                selectedIds={studioTools.selectedIds}
-                loading={studioTools.loading}
-                disabled={busy}
-                unavailableReason={studioTools.unavailableReason}
-                onChange={studioTools.onChange}
-                onClose={closeStudioTools}
-              />
-            </>
-          ) : null}
         </div>
 
         {newChatWorkspaceMode === "agent" &&

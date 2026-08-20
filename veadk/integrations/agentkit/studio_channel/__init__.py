@@ -24,14 +24,20 @@ from veadk.integrations.agentkit.studio_channel.routes import (
     StudioChannelRunHandler,
     mount_studio_channel_routes,
 )
-from veadk.integrations.agentkit.studio_channel.tool import StudioRemoteTool
+from veadk.integrations.agentkit.studio_channel.tool import (
+    StudioExternalToolset,
+    StudioRemoteTool,
+    bind_studio_tools,
+)
 
 __all__ = [
     "PROTOCOL_VERSION",
     "CatalogSnapshot",
     "StudioChannelRunHandler",
+    "StudioExternalToolset",
     "StudioRemoteTool",
     "StudioToolManifest",
     "catalog_revision",
+    "bind_studio_tools",
     "mount_studio_channel_routes",
 ]

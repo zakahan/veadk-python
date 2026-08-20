@@ -98,8 +98,8 @@ class Agent(LlmAgent):
         example_store (Optional[BaseExampleProvider]): Example store for providing example Q/A.
         enable_shadowchar (bool): Whether to enable shadow character for the agent.
         enable_dynamic_load_skills (bool): Whether to enable dynamic loading of skills.
-        enable_bff_tools (bool): Whether AgentKit Runtime may inject tools published
-            by an authenticated BFF for the current run.
+        enable_bff_tools (bool): Deprecated compatibility field. AgentKit Runtime
+            now always mounts the generic BFF tool host.
         enable_responses_cache (bool): Whether Ark Responses API should reuse
             `previous_response_id` and caching for multi-turn continuation.
     """
@@ -214,10 +214,10 @@ class Agent(LlmAgent):
     `veadk.tunnel.mount_tunnel`/`mount_tunnel_if_enabled`."""
 
     enable_bff_tools: bool = False
-    """Allow AgentKit Runtime to inject BFF-published tools for a proxied run.
+    """Deprecated compatibility field; no longer gates the generic BFF tool host.
 
-    This is an explicit capability opt-in. The concrete tool manifests and
-    executors remain owned by the BFF and aren't persisted on the Agent.
+    Concrete tool manifests and executors remain owned by the BFF and are only
+    visible during an explicitly selected Studio-channel run.
     """
 
     def model_post_init(self, __context: Any) -> None:

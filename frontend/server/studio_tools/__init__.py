@@ -23,6 +23,7 @@ from frontend.server.studio_tools.connector import (
 from frontend.server.studio_tools.registry import (
     StudioTool,
     StudioToolCatalogSnapshot,
+    StudioToolExecutionContext,
     StudioToolRegistry,
     build_studio_tool_registry,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "StudioChannelError",
     "StudioTool",
     "StudioToolCatalogSnapshot",
+    "StudioToolExecutionContext",
     "StudioToolRegistry",
     "StudioToolRun",
     "build_studio_tool_registry",

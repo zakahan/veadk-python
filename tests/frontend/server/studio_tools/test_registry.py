@@ -15,14 +15,30 @@
 from __future__ import annotations
 
 import asyncio
+import sys
+from types import ModuleType
 
 import pytest
 
 from frontend.server.studio_tools.registry import (
     StudioTool,
+    StudioToolExecutionContext,
     StudioToolExecutionError,
     StudioToolRegistry,
+    build_studio_tool_registry,
 )
+
+
+def _execution_context() -> StudioToolExecutionContext:
+    return StudioToolExecutionContext(
+        runtime_id="runtime-1",
+        app_name="app-1",
+        user_id="user-1",
+        session_id="session-1",
+        run_id="run-1",
+        scope_id="scope-1",
+        catalog_revision="revision-1",
+    )
 
 
 def _registry() -> StudioToolRegistry:
@@ -90,6 +106,44 @@ async def test_registry_rejects_arguments_before_executor() -> None:
             executor_revision="v1",
             arguments={"left": "six", "right": 7},
         )
+
+
+@pytest.mark.asyncio
+async def test_registry_injects_server_execution_context_only_when_requested() -> None:
+    registry = StudioToolRegistry()
+    seen: list[StudioToolExecutionContext] = []
+
+    async def execute(
+        arguments: dict[str, object],
+        context: StudioToolExecutionContext,
+    ) -> dict[str, object]:
+        seen.append(context)
+        return {"value": arguments["value"], "session_id": context.session_id}
+
+    registry.register(
+        StudioTool(
+            name="studio_context_echo",
+            description="Echo with trusted context.",
+            input_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            executor=execute,
+            requires_context=True,
+        )
+    )
+
+    result = await registry.execute(
+        name="studio_context_echo",
+        executor_revision="v1",
+        arguments={"value": "hello"},
+        context=_execution_context(),
+    )
+
+    assert result == {"value": "hello", "session_id": "session-1"}
+    assert seen == [_execution_context()]
 
 
 @pytest.mark.asyncio
@@ -173,6 +227,19 @@ def test_snapshots_are_independent_and_do_not_mutate_the_registry() -> None:
 def test_snapshot_rejects_unknown_tool_ids() -> None:
     with pytest.raises(ValueError, match="Unknown Studio tools: missing"):
         _registry().snapshot(["missing"])
+
+
+def test_registry_keeps_generic_external_module_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("test_studio_tool_extension")
+    module.register_tools = _register_echo  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setenv("VEADK_STUDIO_TOOL_MODULE", module.__name__)
+
+    registry = build_studio_tool_registry()
+
+    assert "studio_echo" in {item["id"] for item in registry.public_items()}
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ from websockets.exceptions import InvalidStatus
 
 from frontend.server.studio_tools.registry import (
     StudioToolCatalogSnapshot,
+    StudioToolExecutionContext,
     StudioToolExecutionError,
 )
 from veadk.integrations.agentkit.studio_channel.protocol import (
@@ -164,6 +165,7 @@ class StudioToolRun:
         scope_id: str,
         catalog_revision: str,
         run_id: str,
+        execution_context: StudioToolExecutionContext,
     ) -> None:
         self._receive_message = receive_message
         self._send_message = send_message
@@ -172,6 +174,7 @@ class StudioToolRun:
         self.scope_id = scope_id
         self.catalog_revision = catalog_revision
         self.run_id = run_id
+        self.execution_context = execution_context
         self._send_lock = asyncio.Lock()
         self._tool_tasks: dict[str, asyncio.Task[None]] = {}
         self._completed = False
@@ -227,6 +230,7 @@ class StudioToolRun:
                 name=str(message.get("tool_name") or ""),
                 executor_revision=str(message.get("executor_revision") or ""),
                 arguments=arguments,
+                context=self.execution_context,
             )
             content = _bounded_tool_result(content)
         except StudioToolExecutionError as exc:
@@ -356,6 +360,7 @@ async def _open_http_studio_tool_run(
     revision: str,
     run_id: str,
     studio_instance_id: str,
+    execution_context: StudioToolExecutionContext,
 ) -> StudioToolRun:
     channel_id = uuid4().hex
     request_id = uuid4().hex
@@ -455,6 +460,7 @@ async def _open_http_studio_tool_run(
             scope_id=scope_id,
             catalog_revision=revision,
             run_id=run_id,
+            execution_context=execution_context,
         )
     except Exception:
         if response is not None:
@@ -488,6 +494,15 @@ async def open_studio_tool_run(
     scope_id = _scope_id(runtime_id, payload)
     revision = catalog.revision
     run_id = str(payload.get("invocation_id") or uuid4())
+    execution_context = StudioToolExecutionContext(
+        runtime_id=runtime_id,
+        app_name=str(payload.get("app_name") or ""),
+        user_id=str(payload.get("user_id") or ""),
+        session_id=str(payload.get("session_id") or ""),
+        run_id=run_id,
+        scope_id=scope_id,
+        catalog_revision=revision,
+    )
     try:
         websocket = await connect(
             _websocket_url(endpoint),
@@ -515,6 +530,7 @@ async def open_studio_tool_run(
             revision=revision,
             run_id=run_id,
             studio_instance_id=studio_instance_id,
+            execution_context=execution_context,
         )
     try:
 
@@ -583,6 +599,7 @@ async def open_studio_tool_run(
             scope_id=scope_id,
             catalog_revision=revision,
             run_id=run_id,
+            execution_context=execution_context,
         )
     except Exception:
         await websocket.close()

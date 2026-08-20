@@ -24,7 +24,7 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
@@ -34,7 +34,11 @@ from veadk.integrations.agentkit.studio_channel import (
     catalog_revision,
 )
 
+if TYPE_CHECKING:
+    from veadk.multimodal.service import MediaService
+
 ToolExecutor = Callable[[dict[str, Any]], Any]
+ContextToolExecutor = Callable[[dict[str, Any], "StudioToolExecutionContext"], Any]
 
 
 class StudioToolExecutionError(RuntimeError):
@@ -42,16 +46,30 @@ class StudioToolExecutionError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class StudioToolExecutionContext:
+    """Server-derived identity and run scope available only to BFF executors."""
+
+    runtime_id: str
+    app_name: str
+    user_id: str
+    session_id: str
+    run_id: str
+    scope_id: str
+    catalog_revision: str
+
+
+@dataclass(frozen=True)
 class StudioTool:
     name: str
     description: str
     input_schema: dict[str, Any]
-    executor: ToolExecutor
+    executor: ToolExecutor | ContextToolExecutor
     display_name: str = ""
     executor_revision: str = "v1"
     timeout_ms: int = 30_000
     idempotent: bool = False
     risk_level: str = "low"
+    requires_context: bool = False
 
     def manifest(self) -> StudioToolManifest:
         return StudioToolManifest(
@@ -131,6 +149,7 @@ class StudioToolRegistry:
         name: str,
         executor_revision: str,
         arguments: dict[str, Any],
+        context: StudioToolExecutionContext | None = None,
     ) -> Any:
         tool = self._tools.get((name, executor_revision))
         if tool is None:
@@ -144,9 +163,7 @@ class StudioToolRegistry:
                 f"Invalid arguments for Studio tool {name}: {error.message}"
             ) from error
 
-        if inspect.iscoroutinefunction(tool.executor):
-            return await tool.executor(arguments)
-        return await asyncio.to_thread(tool.executor, arguments)
+        return await _invoke_tool(tool, arguments, context)
 
 
 class StudioToolCatalogSnapshot:
@@ -192,6 +209,7 @@ class StudioToolCatalogSnapshot:
         name: str,
         executor_revision: str,
         arguments: dict[str, Any],
+        context: StudioToolExecutionContext | None = None,
     ) -> Any:
         tool = self._tools.get((name, executor_revision))
         if tool is None:
@@ -205,23 +223,41 @@ class StudioToolCatalogSnapshot:
                 f"Invalid arguments for Studio tool {name}: {error.message}"
             ) from error
 
-        if inspect.iscoroutinefunction(tool.executor):
-            return await tool.executor(arguments)
-        return await asyncio.to_thread(tool.executor, arguments)
+        return await _invoke_tool(tool, arguments, context)
 
 
-def build_studio_tool_registry() -> StudioToolRegistry:
+async def _invoke_tool(
+    tool: StudioTool,
+    arguments: dict[str, Any],
+    context: StudioToolExecutionContext | None,
+) -> Any:
+    if tool.requires_context and context is None:
+        raise StudioToolExecutionError(
+            f"Studio tool requires an execution context: {tool.name}"
+        )
+    call_arguments: tuple[Any, ...] = (
+        (arguments, context) if tool.requires_context else (arguments,)
+    )
+    if inspect.iscoroutinefunction(tool.executor):
+        return await tool.executor(*call_arguments)
+    result = await asyncio.to_thread(tool.executor, *call_arguments)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def build_studio_tool_registry(
+    *,
+    media_service: MediaService | None = None,
+) -> StudioToolRegistry:
     """Build the registry selected by server-owned Studio configuration."""
 
     registry = StudioToolRegistry()
-    mode = os.getenv("VEADK_STUDIO_TOOL_CHANNEL", "").strip().lower()
-    if mode in {"1", "true", "yes", "demo", "bytedcli"}:
-        from frontend.server.studio_tools.bytedcli_tools import (
-            register_bytedcli_tools,
-        )
+    from frontend.server.studio_tools.veadk_builtin_tools import (
+        register_veadk_builtin_tools,
+    )
 
-        register_bytedcli_tools(registry)
-
+    register_veadk_builtin_tools(registry, media_service=media_service)
     module_name = os.getenv("VEADK_STUDIO_TOOL_MODULE", "").strip()
     if module_name:
         module = importlib.import_module(module_name)

@@ -14,19 +14,21 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
 from veadk.integrations.agentkit.studio_channel import (
     PROTOCOL_VERSION,
+    StudioExternalToolset,
     StudioRemoteTool,
     StudioToolManifest,
+    bind_studio_tools,
     catalog_revision,
     mount_studio_channel_routes,
 )
@@ -87,8 +89,6 @@ def test_remote_tool_exposes_manifest_schema_and_dispatches() -> None:
     assert declaration.name == "studio_multiply"
     assert declaration.parameters_json_schema == _manifest()["input_schema"]
 
-    import asyncio
-
     result = asyncio.run(
         tool.run_async(
             args={"left": 6, "right": 7},
@@ -100,13 +100,43 @@ def test_remote_tool_exposes_manifest_schema_and_dispatches() -> None:
     assert calls[0]["arguments"] == {"left": 6, "right": 7}
 
 
+@pytest.mark.asyncio
+async def test_external_toolset_isolates_concurrent_run_catalogs() -> None:
+    toolset = StudioExternalToolset()
+
+    def remote_tool(name: str) -> StudioRemoteTool:
+        return StudioRemoteTool(
+            manifest=StudioToolManifest.model_validate(_manifest(name)),
+            dispatcher=cast(Any, object()),
+            run_id=f"run-{name}",
+            scope_id=f"scope-{name}",
+            catalog_revision=f"revision-{name}",
+        )
+
+    async def selected_name(name: str) -> list[str]:
+        with bind_studio_tools([remote_tool(name)]):
+            await asyncio.sleep(0)
+            return [tool.name for tool in await toolset.get_tools()]
+
+    first, second = await asyncio.gather(
+        selected_name("studio_first"),
+        selected_name("studio_second"),
+    )
+
+    assert first == ["studio_first"]
+    assert second == ["studio_second"]
+    assert await toolset.get_tools() == []
+
+
 def test_websocket_runs_and_calls_bff_tool_on_the_same_connection() -> None:
     app = FastAPI()
+    toolset = StudioExternalToolset()
 
     async def run_handler(
-        payload: dict[str, Any], tools: list[BaseTool]
+        payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         assert payload["session_id"] == "session-1"
+        tools = await toolset.get_tools()
         result = await tools[0].run_async(
             args={"left": 6, "right": 7},
             tool_context=cast(ToolContext, None),
@@ -195,9 +225,9 @@ def test_catalog_rejects_agent_tool_name_conflicts() -> None:
     app = FastAPI()
 
     async def run_handler(
-        payload: dict[str, Any], tools: list[BaseTool]
+        payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
-        del payload, tools
+        del payload
         if False:
             yield {}
 
@@ -233,9 +263,9 @@ def test_channel_routes_are_promoted_above_an_existing_catchall() -> None:
         return {"caught": path}
 
     async def run_handler(
-        payload: dict[str, Any], tools: list[BaseTool]
+        payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
-        del payload, tools
+        del payload
         if False:
             yield {}
 
@@ -253,9 +283,9 @@ def test_channel_capability_can_be_advertised_without_enabling_rpc_routes() -> N
     app = FastAPI()
 
     async def run_handler(
-        payload: dict[str, Any], tools: list[BaseTool]
+        payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
-        del payload, tools
+        del payload
         if False:
             yield {}
 
@@ -284,9 +314,9 @@ def test_channel_capability_advertises_supported_transports_when_enabled() -> No
     app = FastAPI()
 
     async def run_handler(
-        payload: dict[str, Any], tools: list[BaseTool]
+        payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
-        del payload, tools
+        del payload
         if False:
             yield {}
 

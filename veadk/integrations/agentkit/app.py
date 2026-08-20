@@ -25,7 +25,7 @@ import traceback
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from agentkit.apps import AgentkitAgentServerApp
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -38,7 +38,6 @@ from google.adk.agents.run_config import StreamingMode
 from google.adk.apps.app import App
 from google.adk.cli.adk_web_server import RunAgentRequest
 from google.adk.runners import Runner as AdkRunner
-from google.adk.tools.base_tool import BaseTool
 from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
@@ -49,11 +48,6 @@ from veadk.agent_metadata import (
 )
 from veadk.agent_search import search_agent_component
 from veadk.cli.frontend_invocation import FrontendInvocationPlugin
-from veadk.integrations.agentkit.session_capabilities import (
-    CapabilityError,
-    SessionCapabilityService,
-    mount_session_capability_routes,
-)
 from veadk.memory.short_term_memory import ShortTermMemory
 
 if TYPE_CHECKING:
@@ -62,24 +56,10 @@ if TYPE_CHECKING:
     from veadk.runner import Runner
 
 
-class _MultiAppAdkServer(Protocol):
-    """ADK services recovered from the multi-app server route closure."""
-
-    session_service: Any
-    artifact_service: Any
-    memory_service: Any
-    credential_service: Any
-    auto_create_session: bool
-    default_app_name: str | None
-
-    async def get_runner_async(self, app_name: str) -> Any: ...
-
-
 _MAX_AGENT_GRAPH_DEPTH = 8
 _SERVER_STATE_KEY = "_veadk_agentkit_server"
 _ADK_SERVER_STATE_KEY = "_veadk_adk_server"
 _DYNAMIC_A2A_ROUTES_ENABLED_STATE_KEY = "_veadk_dynamic_a2a_routes_enabled"
-_SESSION_CAPABILITY_SERVICE_STATE_KEY = "_veadk_session_capability_service"
 _REGISTRY_CONFIG_ATTR = "_veadk_a2a_registry_config"
 _RUNTIME_IDENTITY_REQUIREMENT = (
     "Runtime identity requires agentkit-sdk-python>=0.8.2; "
@@ -210,7 +190,11 @@ def _agent_node(
         "instruction": instruction if isinstance(instruction, str) else "",
         "type": _agent_type(agent),
         "model": _model_name(getattr(agent, "model", "")),
-        "tools": [_tool_label(tool) for tool in getattr(agent, "tools", []) or []],
+        "tools": [
+            _tool_label(tool)
+            for tool in getattr(agent, "tools", []) or []
+            if not getattr(tool, "_veadk_internal_toolset", False)
+        ],
         "skills": agent_skill_summaries(agent),
         "components": agent_component_summaries(agent),
         "path": list(path),
@@ -513,12 +497,6 @@ def _prioritize_platform_routes(app: FastAPI) -> None:
         "/web/agent-info/{app_name}",
         "/web/agent-graph",
         "/web/search",
-        "/harness/capabilities/tools",
-        "/harness/skills/spaces",
-        "/harness/skills/spaces/{space_id}/skills",
-        "/harness/apps/{app_name}/users/{user_id}/sessions/{session_id}/capabilities",
-        "/harness/apps/{app_name}/users/{user_id}/sessions/{session_id}/capabilities/{capability_id}",
-        "/harness/run_sse",
         "/assets",
         "/webui",
         "/webui/{path:path}",
@@ -858,70 +836,44 @@ def _configure_dynamic_a2a_routes(
     setattr(app.state, _DYNAMIC_A2A_ROUTES_ENABLED_STATE_KEY, True)
 
 
-def _configure_session_capability_routes(
+def _configure_studio_tool_routes(
     app: FastAPI,
     root_agent: BaseAgent,
-    *,
-    include_skill_catalog: bool = True,
 ) -> None:
+    """Mount the generic reverse-tool host independently of Session Capability."""
+
     services = _RuntimeServices(app)
     if services.session_service is None:
         return
 
-    capability_service = SessionCapabilityService(
-        root_agent=root_agent,
-        session_service=services.session_service,
-    )
-    setattr(app.state, _SESSION_CAPABILITY_SERVICE_STATE_KEY, capability_service)
-    mount_session_capability_routes(
-        app=app,
-        service=capability_service,
-        include_skill_catalog=include_skill_catalog,
+    from veadk.integrations.agentkit.studio_channel import (
+        StudioExternalToolset,
+        mount_studio_channel_routes,
     )
 
-    async def _build_run(
-        req: RunAgentRequest,
-        studio_tools: list[BaseTool] | None = None,
-    ) -> tuple[AdkRunner, StreamingMode]:
+    agent_tools = getattr(root_agent, "tools", None)
+    if agent_tools is None:
+        raise TypeError("Studio BFF tools require an Agent with a tools list.")
+    reserved_tool_names = {
+        _tool_label(tool)
+        for tool in agent_tools
+        if not isinstance(tool, StudioExternalToolset)
+    }
+    if not any(isinstance(tool, StudioExternalToolset) for tool in agent_tools):
+        agent_tools.append(StudioExternalToolset())
+
+    async def _studio_channel_run(
+        payload: dict[str, Any],
+    ) -> AsyncIterator[dict[str, Any]]:
+        req = RunAgentRequest.model_validate(payload)
         app_name = _resolve_run_app_name(services, root_agent, req)
-        run_agent = await capability_service.build_agent(
+        runner = _dynamic_runner(
+            services,
             app_name=app_name,
-            user_id=req.user_id,
-            session_id=req.session_id,
-        )
-        _add_dynamic_a2a_agent_tools(run_agent, _content_text(req.new_message))
-        if studio_tools:
-            agent_tools = getattr(run_agent, "tools", None)
-            if agent_tools is None:
-                raise CapabilityError(
-                    "Studio tools can only be mounted on an agent with tools."
-                )
-            existing_names = {_tool_label(tool) for tool in agent_tools}
-            conflicts = sorted(
-                {_tool_label(tool) for tool in studio_tools} & existing_names
-            )
-            if conflicts:
-                raise CapabilityError(
-                    "Studio tool names conflict with the Agent: " + ", ".join(conflicts)
-                )
-            agent_tools.extend(studio_tools)
-
-        runner = AdkRunner(
-            app=App(name=app_name, root_agent=run_agent, plugins=[]),
-            artifact_service=services.artifact_service,
-            session_service=services.session_service,
-            memory_service=services.memory_service,
-            credential_service=services.credential_service,
-            auto_create_session=services.auto_create_session,
+            root_agent=root_agent,
+            prompt=_content_text(req.new_message),
         )
         stream_mode = StreamingMode.SSE if req.streaming else StreamingMode.NONE
-        return runner, stream_mode
-
-    async def _run_events(
-        req: RunAgentRequest,
-        runner: AdkRunner,
-        stream_mode: StreamingMode,
-    ) -> AsyncIterator[Any]:
         custom_metadata = _run_request_custom_metadata(req)
         async with Aclosing(
             runner.run_async(
@@ -937,170 +889,14 @@ def _configure_session_capability_routes(
             )
         ) as agen:
             async for event in agen:
-                events_to_stream = [event]
-                if (
-                    not req.function_call_event_id
-                    and event.actions.artifact_delta
-                    and event.content
-                    and event.content.parts
-                ):
-                    content_event = event.model_copy(deep=True)
-                    content_event.actions.artifact_delta = {}
-                    artifact_event = event.model_copy(deep=True)
-                    artifact_event.content = None
-                    events_to_stream = [content_event, artifact_event]
-                for event_to_stream in events_to_stream:
-                    yield event_to_stream
-
-    @app.post("/harness/run_sse")
-    async def run_agent_sse_with_session_capabilities(
-        req: RunAgentRequest,
-    ) -> StreamingResponse:
-        try:
-            runner, stream_mode = await _build_run(req)
-        except CapabilityError as exc:
-            raise HTTPException(
-                status_code=exc.status_code,
-                detail=str(exc),
-            ) from exc
-
-        async def event_generator():
-            try:
-                async for event in _run_events(req, runner, stream_mode):
-                    yield (
-                        "data: "
-                        + event.model_dump_json(exclude_none=True, by_alias=True)
-                        + "\n\n"
-                    )
-            except Exception as exc:  # noqa: BLE001 - SSE surfaces errors as data.
-                yield f"data: {json.dumps({'error': str(exc)})}\n\n"
-
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-    _promote_route(app, run_agent_sse_with_session_capabilities)
-
-    async def _studio_channel_run(
-        payload: dict[str, Any],
-        studio_tools: list[BaseTool],
-    ) -> AsyncIterator[dict[str, Any]]:
-        req = RunAgentRequest.model_validate(payload)
-        runner, stream_mode = await _build_run(req, studio_tools)
-        async for event in _run_events(req, runner, stream_mode):
-            yield event.model_dump(exclude_none=True, by_alias=True, mode="json")
-
-    from veadk.integrations.agentkit.studio_channel import (
-        mount_studio_channel_routes,
-    )
+                yield event.model_dump(exclude_none=True, by_alias=True, mode="json")
 
     mount_studio_channel_routes(
         app=app,
         run_handler=_studio_channel_run,
-        enabled=bool(getattr(root_agent, "enable_bff_tools", False)),
-        reserved_tool_names={
-            _tool_label(tool) for tool in getattr(root_agent, "tools", None) or []
-        },
+        enabled=True,
+        reserved_tool_names=reserved_tool_names,
     )
-
-
-def configure_multi_app_session_capability_routes(
-    app: FastAPI,
-    adk_server: _MultiAppAdkServer,
-) -> None:
-    """Enable session capability overlays on an ADK multi-app dev server."""
-
-    async def service_for(app_name: str) -> SessionCapabilityService:
-        source_runner = await adk_server.get_runner_async(app_name)
-        source_app = getattr(source_runner, "app", None)
-        root_agent = getattr(source_app, "root_agent", None)
-        if not isinstance(root_agent, BaseAgent):
-            raise HTTPException(status_code=404, detail=f"Agent not found: {app_name}")
-        return SessionCapabilityService(
-            root_agent=root_agent,
-            session_service=adk_server.session_service,
-        )
-
-    mount_session_capability_routes(
-        app=app,
-        service_resolver=service_for,
-    )
-
-    @app.post("/harness/run_sse")
-    async def run_multi_app_with_session_capabilities(
-        req: RunAgentRequest,
-    ):
-        app_name = req.app_name or getattr(adk_server, "default_app_name", None)
-        if not app_name:
-            raise HTTPException(status_code=400, detail="app_name is required")
-        req.app_name = app_name
-        try:
-            capability_service = await service_for(app_name)
-            run_agent = await capability_service.build_agent(
-                app_name=app_name,
-                user_id=req.user_id,
-                session_id=req.session_id,
-            )
-        except CapabilityError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-        _add_dynamic_a2a_agent_tools(run_agent, _content_text(req.new_message))
-        source_runner = await adk_server.get_runner_async(app_name)
-        source_app = getattr(source_runner, "app", None)
-        plugins = list(getattr(source_app, "plugins", None) or [])
-        runner = AdkRunner(
-            app=App(name=app_name, root_agent=run_agent, plugins=plugins),
-            artifact_service=adk_server.artifact_service,
-            session_service=adk_server.session_service,
-            memory_service=adk_server.memory_service,
-            credential_service=adk_server.credential_service,
-            auto_create_session=adk_server.auto_create_session,
-        )
-        stream_mode = StreamingMode.SSE if req.streaming else StreamingMode.NONE
-        custom_metadata = _run_request_custom_metadata(req)
-
-        async def event_generator():
-            try:
-                async with Aclosing(
-                    runner.run_async(
-                        user_id=req.user_id,
-                        session_id=req.session_id,
-                        new_message=req.new_message,
-                        state_delta=req.state_delta,
-                        run_config=RunConfig(
-                            streaming_mode=stream_mode,
-                            custom_metadata=custom_metadata,
-                        ),
-                        invocation_id=req.invocation_id,
-                    )
-                ) as agen:
-                    async for event in agen:
-                        events_to_stream = [event]
-                        if (
-                            not req.function_call_event_id
-                            and event.actions.artifact_delta
-                            and event.content
-                            and event.content.parts
-                        ):
-                            content_event = event.model_copy(deep=True)
-                            content_event.actions.artifact_delta = {}
-                            artifact_event = event.model_copy(deep=True)
-                            artifact_event.content = None
-                            events_to_stream = [content_event, artifact_event]
-
-                        for event_to_stream in events_to_stream:
-                            yield (
-                                "data: "
-                                + event_to_stream.model_dump_json(
-                                    exclude_none=True,
-                                    by_alias=True,
-                                )
-                                + "\n\n"
-                            )
-            except Exception as exc:  # noqa: BLE001 - SSE surfaces errors as data.
-                yield f"data: {json.dumps({'error': str(exc)})}\n\n"
-
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-    _promote_route(app, run_multi_app_with_session_capabilities)
 
 
 def create_agentkit_app(
@@ -1156,11 +952,7 @@ def create_agentkit_app(
     app = cast(FastAPI, agent_server.app)
     setattr(app.state, _SERVER_STATE_KEY, agent_server)
     _configure_dynamic_a2a_routes(app, root_agent)
-    _configure_session_capability_routes(
-        app,
-        root_agent,
-        include_skill_catalog=not enable_studio_routes,
-    )
+    _configure_studio_tool_routes(app, root_agent)
 
     if enable_feishu:
         _configure_feishu_lifecycle(app, root_agent, short_term_memory)

@@ -16,9 +16,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Protocol
 
+from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
@@ -35,6 +40,44 @@ class StudioToolDispatcher(Protocol):
         manifest: StudioToolManifest,
         arguments: dict[str, Any],
     ) -> Any: ...
+
+
+_current_studio_tools: ContextVar[tuple[BaseTool, ...]] = ContextVar(
+    "veadk_current_studio_tools",
+    default=(),
+)
+
+
+class StudioExternalToolset(BaseToolset):
+    """Resolve the current run's BFF tools without mutating the shared Agent."""
+
+    _veadk_internal_toolset = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        # BaseToolset's invocation cache is shared by this singleton. The
+        # ContextVar is already an immutable per-run snapshot, so resolving it
+        # on every model request is both cheaper to reason about and safe under
+        # concurrent invocations.
+        self._use_invocation_cache = False
+
+    async def get_tools(
+        self,
+        readonly_context: ReadonlyContext | None = None,
+    ) -> list[BaseTool]:
+        del readonly_context
+        return list(_current_studio_tools.get())
+
+
+@contextmanager
+def bind_studio_tools(tools: Sequence[BaseTool]) -> Iterator[None]:
+    """Bind an immutable Studio tool snapshot to the current async run."""
+
+    token = _current_studio_tools.set(tuple(tools))
+    try:
+        yield
+    finally:
+        _current_studio_tools.reset(token)
 
 
 class StudioRemoteTool(BaseTool):

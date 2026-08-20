@@ -25,13 +25,15 @@ from typing import cast
 import pytest
 import uvicorn
 from fastapi import FastAPI
-from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from websockets.exceptions import InvalidStatus
 
 import frontend.server.studio_tools.connector as connector
 from frontend.server.studio_tools.registry import StudioTool, StudioToolRegistry
-from veadk.integrations.agentkit.studio_channel import mount_studio_channel_routes
+from veadk.integrations.agentkit.studio_channel import (
+    StudioExternalToolset,
+    mount_studio_channel_routes,
+)
 
 
 class _FakeWebSocket:
@@ -263,6 +265,13 @@ async def test_connector_runs_and_executes_tool_over_one_websocket(
 
     chunks = [chunk async for chunk in run.stream()]
 
+    assert run.execution_context.runtime_id == "runtime-1"
+    assert run.execution_context.app_name == "agent"
+    assert run.execution_context.user_id == "user-1"
+    assert run.execution_context.session_id == "session-1"
+    assert run.execution_context.run_id == run.run_id
+    assert run.execution_context.scope_id == run.scope_id
+    assert run.execution_context.catalog_revision == run.catalog_revision
     assert connect_calls[0][0] == (
         "wss://runtime.example/base/harness/studio-channel/v1?gateway=value"
     )
@@ -321,9 +330,10 @@ async def test_connector_falls_back_to_http_and_completes_a_tool_call(
     app = FastAPI()
 
     async def run_handler(
-        payload: dict[str, Any], tools: list[BaseTool]
+        payload: dict[str, Any],
     ) -> AsyncIterator[dict[str, Any]]:
         assert payload["session_id"] == "session-1"
+        tools = await StudioExternalToolset().get_tools()
         result = await tools[0].run_async(
             args={"left": 6, "right": 7},
             tool_context=cast(ToolContext, None),

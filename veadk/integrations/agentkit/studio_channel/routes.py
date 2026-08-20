@@ -28,7 +28,6 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
-from google.adk.tools.base_tool import BaseTool
 from pydantic import ValidationError
 
 from veadk.integrations.agentkit.studio_channel.protocol import (
@@ -41,14 +40,15 @@ from veadk.integrations.agentkit.studio_channel.protocol import (
     StudioToolManifest,
     validate_catalog,
 )
-from veadk.integrations.agentkit.studio_channel.tool import StudioRemoteTool
+from veadk.integrations.agentkit.studio_channel.tool import (
+    StudioRemoteTool,
+    bind_studio_tools,
+)
 from veadk.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-StudioChannelRunHandler = Callable[
-    [dict[str, Any], list[BaseTool]], AsyncIterator[dict[str, Any]]
-]
+StudioChannelRunHandler = Callable[[dict[str, Any]], AsyncIterator[dict[str, Any]]]
 StudioChannelSender = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -184,7 +184,7 @@ class _StudioChannelConnection:
                 run_id=run_id,
             )
             return
-        tools: list[BaseTool] = [
+        tools = [
             StudioRemoteTool(
                 manifest=manifest,
                 dispatcher=self,
@@ -210,15 +210,18 @@ class _StudioChannelConnection:
         run_id: str,
         request_id: str,
         payload: dict[str, Any],
-        tools: list[BaseTool],
+        tools: list[StudioRemoteTool],
     ) -> None:
         await self.send(
             {"type": "run.started", "request_id": request_id, "run_id": run_id}
         )
         status = "success"
         try:
-            async for event in self.run_handler(payload, tools):
-                await self.send({"type": "run.event", "run_id": run_id, "event": event})
+            with bind_studio_tools(tools):
+                async for event in self.run_handler(payload):
+                    await self.send(
+                        {"type": "run.event", "run_id": run_id, "event": event}
+                    )
         except asyncio.CancelledError:
             status = "cancelled"
         except Exception as error:  # noqa: BLE001 - runtime boundary

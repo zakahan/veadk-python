@@ -165,17 +165,10 @@ def test_create_agentkit_app_keeps_legacy_agentkit_compatible_without_identity(
     assert isinstance(app, FastAPI)
 
 
-@pytest.mark.parametrize(
-    ("enabled", "expected_transports"),
-    [
-        (False, []),
-        (True, ["websocket", "http-sse"]),
-    ],
-)
-def test_create_agentkit_app_uses_agent_bff_tool_opt_in(
+@pytest.mark.parametrize("legacy_opt_in", [False, True])
+def test_create_agentkit_app_always_mounts_generic_bff_tool_host(
     monkeypatch: pytest.MonkeyPatch,
-    enabled: bool,
-    expected_transports: list[str],
+    legacy_opt_in: bool,
 ) -> None:
     class SessionAgentServer(_FakeAgentServer):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -184,7 +177,7 @@ def test_create_agentkit_app_uses_agent_bff_tool_opt_in(
 
     monkeypatch.setattr(agentkit_app, "AgentkitAgentServerApp", SessionAgentServer)
     root_agent = _root_agent()
-    setattr(root_agent, "enable_bff_tools", enabled)
+    setattr(root_agent, "enable_bff_tools", legacy_opt_in)
 
     app = agentkit_app.create_agentkit_app(root_agent)
     client = TestClient(app)
@@ -192,9 +185,9 @@ def test_create_agentkit_app_uses_agent_bff_tool_opt_in(
 
     assert capability.status_code == 200
     assert capability.json() == {
-        "enabled": enabled,
+        "enabled": True,
         "protocol": "studio-tool-channel/1",
-        "transports": expected_transports,
+        "transports": ["websocket", "http-sse"],
     }
     rpc_paths = {
         route.path
@@ -202,7 +195,7 @@ def test_create_agentkit_app_uses_agent_bff_tool_opt_in(
         if hasattr(route, "path")
         and route.path != "/harness/studio-channel/v1/capabilities"
     }
-    assert ("/harness/studio-channel/v1/http-runs" in rpc_paths) is enabled
+    assert "/harness/studio-channel/v1/http-runs" in rpc_paths
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -238,10 +231,11 @@ def test_create_agentkit_app_uses_runtime_bff_route_opt_in(
             *getattr(getattr(route, "original_router", None), "routes", ()),
         )
     }
-    assert ("/harness/skills/findskill" in paths) == (not enabled)
-    assert ("/harness/skills/spaces" in paths) == (not enabled)
-    assert ("/harness/skills/spaces/{space_id}/skills" in paths) == (not enabled)
-    assert "/harness/capabilities/tools" in paths
+    assert "/harness/skills/findskill" not in paths
+    assert "/harness/skills/spaces" not in paths
+    assert "/harness/skills/spaces/{space_id}/skills" not in paths
+    assert "/harness/capabilities/tools" not in paths
+    assert "/harness/run_sse" not in paths
 
 
 def test_create_agentkit_app_requires_new_agentkit_only_when_identity_is_used(
