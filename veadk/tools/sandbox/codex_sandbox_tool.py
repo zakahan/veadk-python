@@ -102,6 +102,16 @@ class CodexSandboxTool(BaseTool):
                             "result": payload.get("finalText", ""),
                             "sessionId": sid,
                             "turnId": tid,
+                            **(
+                                {"reason": payload["reason"]}
+                                if payload.get("reason")
+                                else {}
+                            ),
+                            **(
+                                {"error": payload["error"]}
+                                if payload.get("error")
+                                else {}
+                            ),
                         }
             except asyncio.CancelledError:
                 if sid:

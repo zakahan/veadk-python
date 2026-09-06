@@ -103,3 +103,64 @@ async def test_cancel_does_not_start_a_turn(monkeypatch):
         ("GET", "/sessions/sid/turns/tid"),
         ("POST", "/sessions/sid/turns/tid/cancel"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_failed_tool_returns_error_details(monkeypatch):
+    from types import SimpleNamespace
+    from veadk.tools.sandbox import codex_sandbox_tool as module
+
+    error = {"message": "unknown tool type: namespace", "codexErrorInfo": "other"}
+    emitted = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def create_session(self, key):
+            return "sid"
+
+        async def start_turn(self, *args):
+            return {"turnId": "tid"}
+
+        async def events(self, *args):
+            yield {
+                "type": "turn.completed",
+                "payload": {
+                    "status": "failed",
+                    "reason": "codex_turn_completed",
+                    "error": error,
+                },
+            }
+
+    async def emit(event):
+        emitted.append(event)
+
+    monkeypatch.setattr(module, "CodexWorkerClient", Client)
+    monkeypatch.setattr(module, "emit_tool_event", emit)
+    context = SimpleNamespace(
+        function_call_id="call",
+        state={},
+        _invocation_context=SimpleNamespace(
+            app_name="app",
+            user_id="user",
+            session=SimpleNamespace(id="session"),
+            invocation_id="invocation",
+            branch=None,
+            agent=SimpleNamespace(name="parent"),
+        ),
+    )
+    result = await module.CodexSandboxTool("https://sandbox.example").run_async(
+        args={"task": "test"},
+        tool_context=context,
+    )
+    assert result["status"] == "failed"
+    assert result["reason"] == "codex_turn_completed"
+    assert result["error"] == error
+    assert emitted[0].custom_metadata["codex_worker"]["payload"]["error"] == error
