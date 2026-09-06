@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from contextlib import aclosing as Aclosing
+
 import os
 import warnings
 from typing import TYPE_CHECKING, AsyncGenerator, Dict, Literal, Optional, Union
@@ -787,8 +789,17 @@ class Agent(LlmAgent):
         stream, so the surrounding ``Runner`` is unaffected.
         """
         if self.runtime == "adk":
-            async for event in super()._run_async_impl(ctx):
-                yield event
+            if any(getattr(tool, "emits_progress", False) for tool in self.tools):
+                from veadk.runtime.tool_events import stream_tool_events
+
+                async with Aclosing(
+                    stream_tool_events(super()._run_async_impl(ctx))
+                ) as events:
+                    async for event in events:
+                        yield event
+            else:
+                async for event in super()._run_async_impl(ctx):
+                    yield event
             return
 
         from veadk.runtime import get_runtime
