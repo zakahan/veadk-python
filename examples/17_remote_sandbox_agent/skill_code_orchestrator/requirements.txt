@@ -1,0 +1,5 @@
+# Official main: AgentkitRemoteSandboxAgent is absent from the 1.1.10 wheel.
+veadk-python @ https://github.com/volcengine/veadk-python/archive/c0cf4fb0f22eacaee33e99afb941fa2f38a3900a.zip
+google-adk==2.2.0
+agentkit-sdk-python==0.8.5
+python-dotenv>=1.0,<2

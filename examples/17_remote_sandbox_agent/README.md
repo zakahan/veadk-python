@@ -1,5 +1,7 @@
 # Remote Sandbox Agent
 
+- [`skill_code_orchestrator/`](skill_code_orchestrator/README.md)：原生 root + Skill/CodeEnv 子 agent，独立 ToolId、流式输出及本地构建后部署到 AgentKit。
+
 - `multi_agents/agent.py`：coordinator 将任务转交给远端 sandbox 子 agent。
 - `single_agent/agent.py`：直接使用远端 sandbox 作为 root agent。
 - `single_agent/server.py`：通过 `AgentkitAgentServerApp` 提供 HTTP/SSE 服务。

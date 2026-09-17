@@ -1,0 +1,8 @@
+.env
+.env.*
+agentkit*.yaml
+.agentkit
+.venv
+__pycache__
+test_*.py
+.pytest_cache
